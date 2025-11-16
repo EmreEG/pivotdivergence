@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Dict, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from config import config
 from monitoring.logging_utils import setup_logging
@@ -64,6 +65,10 @@ async def root():
         "version": "1.0.0",
         "status": "running" if trading_system and trading_system.running else "stopped"
     }
+
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(content=b"", media_type="image/x-icon")
 
 @app.get("/health")
 async def health():

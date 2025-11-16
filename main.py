@@ -58,6 +58,12 @@ class TradingSystem:
         self._last_market_event_ts = time.monotonic()
         self._cvd_bar_abs = {}
         self._cvd_bar_signed = {}
+        self.current_price = None
+        self.current_funding = None
+        self.running = False
+        self.current_volatility = 0.01
+        self.current_levels = []
+        self._profile_shapes: Dict[str, str] = {}
 
         from ingest.market_data_manager import MarketDataManager
         self.market_data_manager = MarketDataManager(
@@ -113,13 +119,6 @@ class TradingSystem:
 
         self.persistence_coordinator.load_avwap_snapshot()
         self.persistence_coordinator.load_cvd_snapshot()
-
-        self.current_price = None
-        self.current_funding = None
-        self.running = False
-        self.current_volatility = 0.01
-        self.current_levels = []
-        self._profile_shapes: Dict[str, str] = {}
 
 
 
