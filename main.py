@@ -28,8 +28,10 @@ from config import config
 from monitoring.signal_auditor import SignalAuditor
 from monitoring.logging_utils import setup_logging
 from monitoring.async_utils import run_tasks_with_cleanup
+from monitoring.microstructure import MicrostructureHealthMonitor
+from orchestration.persistence import PersistenceCoordinator
 from orchestration.services import (
-    IngestCoordinator,
+    MarketEventService,
     AnalyticsDispatcher,
     SignalLifecycleCoordinator,
     ExecutionRiskSupervisor,
@@ -59,10 +61,6 @@ class TradingSystem:
         self._signal_overlap_pct = self.levels_cfg.get('signal_overlap_pct', 0.001)
         self.cvd_snapshot_path = Path('logs') / 'cvd_snapshot.json'
         self.avwap_snapshot_path = Path('logs') / 'avwap_snapshot.json'
-        self.last_cvd_snapshot = 0.0
-        self.last_avwap_snapshot = 0.0
-        self.microstructure_contaminated_until = 0.0
-        self.unsafe_mode = False
         self.reported_position = 0.0
         self.last_funding_rate: Optional[float] = None
         self.last_funding_anchor_ts: Optional[float] = None
@@ -110,13 +108,25 @@ class TradingSystem:
         ack_budget_ms = self.monitoring_cfg.get('signal_ack_budget_ms', 1000)
         self.signal_auditor = SignalAuditor(audit_log_path, ack_budget_ms=ack_budget_ms)
 
-        self.ingest_coordinator = IngestCoordinator(self)
+        self.persistence_coordinator = PersistenceCoordinator(self)
+        self.microstructure_monitor = MicrostructureHealthMonitor(
+            self.microstructure_cfg,
+            self.monitoring_cfg,
+            self.execution_manager,
+            self.analytics_engine.obi_calc,
+            self.persister,
+        )
+        self.market_events = MarketEventService(
+            self,
+            self.microstructure_monitor,
+            self.persistence_coordinator,
+        )
         self.analytics_dispatcher = AnalyticsDispatcher(self)
         self.signal_coordinator = SignalLifecycleCoordinator(self)
         self.execution_supervisor = ExecutionRiskSupervisor(self)
 
-        self.ingest_coordinator.load_avwap_snapshot()
-        self.ingest_coordinator.load_cvd_snapshot()
+        self.persistence_coordinator.load_avwap_snapshot()
+        self.persistence_coordinator.load_cvd_snapshot()
 
         self.current_price = None
         self.current_funding = None
@@ -151,13 +161,13 @@ class TradingSystem:
         await self.execution_manager.initialize()
         self._sync_tick_size()
         self.market_data_manager.register_handlers(
-            trade_handler=self.ingest_coordinator.handle_trade,
-            orderbook_handler=self.ingest_coordinator.handle_orderbook,
-            ticker_handler=self.ingest_coordinator.handle_ticker,
-            oi_handler=self.ingest_coordinator.handle_oi,
-            gap_handler=self.ingest_coordinator.handle_gap,
-            latency_handler=self.ingest_coordinator.handle_latency_event,
-            drop_handler=self.ingest_coordinator.handle_drop,
+            trade_handler=self.market_events.handle_trade,
+            orderbook_handler=self.market_events.handle_orderbook,
+            ticker_handler=self.market_events.handle_ticker,
+            oi_handler=self.market_events.handle_oi,
+            gap_handler=self.market_events.handle_gap,
+            latency_handler=self.market_events.handle_latency_event,
+            drop_handler=self.market_events.handle_drop,
             kill_switch_handler=self.execution_supervisor.handle_kill_switch,
             user_order_handler=self.execution_supervisor.handle_user_order,
         )

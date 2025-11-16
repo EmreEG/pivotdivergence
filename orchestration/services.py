@@ -1,8 +1,6 @@
 import asyncio
-import json
 import logging
 import time
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from api.alerts import alert_webhook
@@ -17,42 +15,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class IngestCoordinator:
-    def __init__(self, system: 'TradingSystem'):
+class MarketEventService:
+    def __init__(self, system: 'TradingSystem', microstructure_monitor, persistence_coordinator):
         self.system = system
+        self.microstructure = microstructure_monitor
+        self.persistence = persistence_coordinator
 
     def mark_market_event(self) -> None:
         self.system._last_market_event_ts = time.monotonic()
-
-    def mark_microstructure_contaminated(self, source: str):
-        system = self.system
-        hold = system.microstructure_cfg.get('contamination_hold_s', 60)
-        if system.execution_manager.paper_mode:
-            system.microstructure_contaminated_until = 0.0
-        else:
-            system.microstructure_contaminated_until = time.time() + hold
-            system.obi_calc.mark_contaminated(hold)
-        metrics.mark_microstructure(False, source)
-        if not system.execution_manager.paper_mode and not system.unsafe_mode:
-            self.activate_unsafe_mode(source)
-
-    def activate_unsafe_mode(self, reason: str):
-        system = self.system
-        flag_path = system.monitoring_cfg.get('unsafe_flag_file')
-        if not flag_path:
-            return
-        path = Path(flag_path)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                'reason': reason,
-                'activated_at': int(time.time())
-            }
-            path.write_text(json.dumps(payload))
-            system.unsafe_mode = True
-            logger.warning("Unsafe mode activated automatically due to %s", reason)
-        except Exception as exc:
-            logger.error("Failed to write unsafe-mode flag file: %s", exc)
 
     async def resync_orderbook(self, reason: str):
         system = self.system
@@ -63,73 +33,14 @@ class IngestCoordinator:
             )
             system.book_manager.process_snapshot(snapshot)
             system.cvd_calc.mark_resynced()
-            self.mark_microstructure_contaminated(reason)
+            self.microstructure.mark_contaminated(reason)
             metrics.record_orderbook_resync()
         except Exception as exc:
             logger.error("Order book resync failed: %s", exc)
             if not system.execution_manager.paper_mode:
                 await system.execution_supervisor.handle_kill_switch('orderbook_resync_failed')
             else:
-                self.mark_microstructure_contaminated('orderbook_resync_failed')
-
-    def load_avwap_snapshot(self):
-        system = self.system
-        try:
-            if system.avwap_snapshot_path.exists():
-                data = json.loads(system.avwap_snapshot_path.read_text())
-                system.avwap_manager.restore(data)
-                logger.info("Restored AVWAP snapshot state")
-        except Exception as exc:
-            logger.warning("AVWAP snapshot restore failed: %s", exc)
-
-    def persist_avwap_snapshot(self):
-        system = self.system
-        now = time.time()
-        if now - system.last_avwap_snapshot < 30:
-            return
-        try:
-            snapshot = system.avwap_manager.snapshot()
-            system.avwap_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            system.avwap_snapshot_path.write_text(json.dumps(snapshot))
-            system.last_avwap_snapshot = now
-        except Exception as exc:
-            logger.error("AVWAP snapshot persist failed: %s", exc)
-
-    def load_cvd_snapshot(self):
-        system = self.system
-        try:
-            if system.cvd_snapshot_path.exists():
-                data = json.loads(system.cvd_snapshot_path.read_text())
-                system.cvd_calc.restore_state(data)
-                logger.info("Restored CVD snapshot state")
-        except Exception as exc:
-            logger.warning("CVD snapshot restore failed: %s", exc)
-
-    def persist_cvd_snapshot(self):
-        system = self.system
-        now = time.time()
-        if now - system.last_cvd_snapshot < 30:
-            return
-        try:
-            snapshot = system.cvd_calc.snapshot_state()
-            if snapshot and snapshot.get('stable', True):
-                system.cvd_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-                system.cvd_snapshot_path.write_text(json.dumps(snapshot))
-                system.last_cvd_snapshot = now
-        except Exception as exc:
-            logger.error("CVD snapshot persist failed: %s", exc)
-
-    def check_backpressure(self) -> bool:
-        system = self.system
-        max_buffer = system.persister.batch_size * 10
-        buffers = {
-            'book': len(system.persister.book_buffer),
-            'mark': len(system.persister.mark_buffer)
-        }
-        if any(count > max_buffer for count in buffers.values()):
-            self.mark_microstructure_contaminated('backpressure')
-            return True
-        return False
+                self.microstructure.mark_contaminated('orderbook_resync_failed')
 
     async def handle_trade(self, trade: Dict):
         system = self.system
@@ -149,11 +60,10 @@ class IngestCoordinator:
         if stable_cvd:
             metrics.update_cvd(cvd_value)
         else:
-            self.mark_microstructure_contaminated('cvd_gap')
-        self.persist_cvd_snapshot()
+            self.microstructure.mark_contaminated('cvd_gap')
 
-        await system.persister.insert_trade(trade)
-        self.check_backpressure()
+        await self.persistence.persist_trade(trade)
+        self.microstructure.check_backpressure()
 
     async def handle_orderbook(self, orderbook: Dict):
         system = self.system
@@ -200,7 +110,7 @@ class IngestCoordinator:
             return
 
         if system.book_manager.is_stale(time.monotonic()):
-            self.mark_microstructure_contaminated('stale_book')
+            self.microstructure.mark_contaminated('stale_book')
 
         obi_stats = system.analytics_engine.on_orderbook(orderbook, system.book_manager)
         system.last_depth_stats = dict(obi_stats)
@@ -209,16 +119,15 @@ class IngestCoordinator:
         metrics.record_orderbook_update(obi_stats)
         if obi_z is not None:
             metrics.update_obi_z(obi_z)
-            metrics.mark_microstructure(True, 'healthy')
+            self.microstructure.mark_healthy()
         else:
             metrics.mark_microstructure(False, 'obi_disabled')
 
-        await system.persister.insert_obi_snapshot({
-            'symbol': system.symbol,
-            **obi_stats
-        })
-        await system.persister.insert_book_snapshot(system.book_manager.to_dict())
-        self.check_backpressure()
+        await self.persistence.persist_orderbook(
+            obi_stats,
+            system.book_manager.to_dict()
+        )
+        self.microstructure.check_backpressure()
 
     async def handle_ticker(self, ticker: Dict):
         system = self.system
@@ -235,7 +144,7 @@ class IngestCoordinator:
                 ts = ticker['timestamp'] / 1000
                 anchor_id = f"funding_{int(ts)}"
                 system.avwap_manager.create_avwap(anchor_id, ts, 'funding')
-                self.persist_avwap_snapshot()
+                self.persistence.persist_avwap_snapshot()
                 event_profile = VolumeProfile(system.symbol, 86400)
                 event_profile.set_tick_size(system.tick_size)
                 event_profile.anchor_ts = ts
@@ -243,7 +152,7 @@ class IngestCoordinator:
                 system.last_funding_anchor_ts = ts
                 system.last_funding_rate = system.current_funding
 
-        await system.persister.insert_mark_price({
+        await self.persistence.persist_mark_price({
             'symbol': system.symbol,
             'timestamp': ticker['timestamp'],
             'mark_price': system.current_price,
@@ -259,10 +168,10 @@ class IngestCoordinator:
             return
 
         system.analytics_engine.on_oi(oi_data)
-        await system.persister.insert_open_interest(oi_data)
+        await self.persistence.persist_open_interest(oi_data)
 
     async def handle_gap(self, gap_duration: float):
-        self.mark_microstructure_contaminated('gap')
+        self.microstructure.mark_contaminated('gap')
         metrics.record_reconnect()
         try:
             await self.resync_orderbook('stream_gap')
@@ -280,7 +189,7 @@ class IngestCoordinator:
 
     async def handle_drop(self, reason: str):
         metrics.record_drop(reason)
-        self.mark_microstructure_contaminated(f"message_loss_{reason}")
+        self.microstructure.mark_contaminated(f"message_loss_{reason}")
 
 
 class AnalyticsDispatcher:
@@ -325,7 +234,7 @@ class AnalyticsDispatcher:
 
                 anchor_id = f"swing_{new_swing['type']}_{int(new_swing['timestamp'])}"
                 system.analytics_engine.avwap_manager.create_avwap(anchor_id, new_swing['timestamp'], f"swing_{new_swing['type']}")
-                system.ingest_coordinator.persist_avwap_snapshot()
+                system.persistence_coordinator.persist_avwap_snapshot()
 
                 event_profile = VolumeProfile(system.symbol, 86400)
                 event_profile.set_tick_size(system.tick_size)
@@ -343,7 +252,7 @@ class AnalyticsDispatcher:
             metrics.update_queue_depth('signal', len(system.persister.signal_buffer))
 
             indicator_snapshot = system.analytics_engine.get_indicator_snapshot()
-            await system.persister.insert_indicator_state(indicator_snapshot)
+            await system.persistence_coordinator.persist_indicator_state(indicator_snapshot)
 
 
 class SignalLifecycleCoordinator:
@@ -426,7 +335,7 @@ class SignalLifecycleCoordinator:
             return True
         if system.execution_manager.paper_mode:
             return False
-        return time.time() < system.microstructure_contaminated_until
+        return system.microstructure_monitor.is_contaminated()
 
     async def process_levels_and_signals(self):
         system = self.system
@@ -476,7 +385,7 @@ class SignalLifecycleCoordinator:
             book_depth = len(top_levels['bids']) + len(top_levels['asks'])
             suppress_obi = (
                 book_depth < system.microstructure_cfg.get('obi_disable_depth', 10) or
-                ((not system.execution_manager.paper_mode) and time.time() < system.microstructure_contaminated_until) or
+                ((not system.execution_manager.paper_mode) and system.microstructure_monitor.is_contaminated()) or
                 system.analytics_engine.obi_calc.is_contaminated()
             )
 
@@ -529,7 +438,7 @@ class SignalLifecycleCoordinator:
                                 exc,
                             )
                     if snapshot:
-                        await system.persister.insert_signal(snapshot.to_dict())
+                        await system.persistence_coordinator.persist_signal(snapshot.to_dict())
 
             for sig in list(system.signal_manager.active_signals.values()):
                 if sig.state.value == 'armed':
@@ -566,7 +475,7 @@ class SignalLifecycleCoordinator:
                             sig.order_id or 'unknown'
                         )
                         system.execution_supervisor.arm_hold_timer(sig)
-                        await system.persister.insert_signal(sig.to_dict())
+                        await system.persistence_coordinator.persist_signal(sig.to_dict())
 
             for signal in list(system.signal_manager.active_signals.values()):
                 if signal.state in (SignalState.FILLED, SignalState.PARTIAL) and signal.entry_price:
@@ -604,7 +513,7 @@ class SignalLifecycleCoordinator:
                     avwap_id = f"entry_{signal.signal_id}"
                     if avwap_id not in system.analytics_engine.avwap_manager.avwaps:
                         system.analytics_engine.avwap_manager.create_avwap(avwap_id, signal.filled_at, 'entry')
-                        system.ingest_coordinator.persist_avwap_snapshot()
+                        system.persistence_coordinator.persist_avwap_snapshot()
 
                     avwap_obj = system.analytics_engine.avwap_manager.get_avwap(avwap_id)
                     if avwap_obj and avwap_obj.avwap and avwap_obj.sigma:
@@ -668,7 +577,7 @@ class ExecutionRiskSupervisor:
             exit_price,
             pnl_usd,
         )
-        await system.persister.insert_signal(signal.to_dict())
+        await system.persistence_coordinator.persist_signal(signal.to_dict())
 
     async def handle_signal_filled(self, signal: Signal, entry_px: float, filled_qty: float,
                                     total_qty: float, order_id: str, ack_status: str):
@@ -774,7 +683,7 @@ class ExecutionRiskSupervisor:
             payload,
             ack_latency_s=ack_latency or signal.last_ack_latency
         )
-        await self.system.persister.insert_signal(signal.to_dict())
+        await self.system.persistence_coordinator.persist_signal(signal.to_dict())
 
     def record_signal_latency(self, path: str, start_ts: float):
         if start_ts is None or start_ts <= 0:
@@ -827,29 +736,13 @@ class ExecutionRiskSupervisor:
     def is_trading_blocked(self) -> bool:
         system = self.system
         if not system.execution_manager.paper_mode:
-            if self.check_unsafe_mode():
+            monitor = system.microstructure_monitor
+            if monitor.check_unsafe_flag():
                 return True
-            if time.time() < system.microstructure_contaminated_until:
+            if monitor.is_contaminated():
                 return True
             if system.book_manager.is_stale():
                 return True
-        return False
-
-    def check_unsafe_mode(self) -> bool:
-        system = self.system
-        if system.execution_manager.paper_mode:
-            system.unsafe_mode = False
-            return False
-        flag_path = system.monitoring_cfg.get('unsafe_flag_file')
-        if not flag_path:
-            return False
-        path = Path(flag_path)
-        if path.exists():
-            if not system.unsafe_mode:
-                logger.warning("Unsafe mode enabled – blocking new orders")
-            system.unsafe_mode = True
-            return True
-        system.unsafe_mode = False
         return False
 
     async def execute_signal(self, signal: Signal):
@@ -952,7 +845,7 @@ class ExecutionRiskSupervisor:
                 'order_placed'
             )
 
-            await system.persister.insert_signal(signal.to_dict())
+            await system.persistence_coordinator.persist_signal(signal.to_dict())
         else:
             logger.error(
                 "Failed to place order for signal %s",
@@ -983,7 +876,7 @@ class ExecutionRiskSupervisor:
             'oi_slope': system.oi_analyzer.get_slope(),
             'divergences': signal.divergences,
             'cvd_unstable': not system.cvd_calc.is_stable(),
-            'microstructure_degraded': time.time() < system.microstructure_contaminated_until,
+            'microstructure_degraded': system.microstructure_monitor.is_contaminated(),
             'volatility': system.current_volatility,
             'requested_qty': signal.requested_qty,
             'requested_notional': signal.requested_notional,
@@ -1099,7 +992,7 @@ class ExecutionRiskSupervisor:
             logger.info("Kill switch cancelled %s open orders", cancelled)
         except Exception as exc:
             logger.error("Kill switch cancel-all failed: %s", exc)
-        system.ingest_coordinator.mark_microstructure_contaminated(f"kill_switch_{reason}")
+        system.microstructure_monitor.mark_contaminated(f"kill_switch_{reason}")
 
     async def handle_user_order(self, order: Dict):
         system = self.system
@@ -1264,4 +1157,4 @@ class ExecutionRiskSupervisor:
                 px,
                 'breakthrough_order_placed'
             )
-            await system.persister.insert_signal(signal.to_dict())
+            await system.persistence_coordinator.persist_signal(signal.to_dict())
