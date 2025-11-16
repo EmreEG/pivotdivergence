@@ -1,31 +1,57 @@
 import asyncio
-import asyncpg
 import json
 import logging
-from typing import Dict, Any
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Callable, Dict, List
+
+import asyncpg
+
 from config import config
 
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class BufferDefinition:
+    name: str
+    sql: str
+    row_builder: Callable[[Dict[str, Any]], Any]
+
+
+class PersistenceBuffer:
+    def __init__(self, definition: BufferDefinition):
+        self.definition = definition
+        self.records: List[Dict[str, Any]] = []
+
+    def append(self, payload: Dict[str, Any]) -> None:
+        self.records.append(payload)
+
+    def build_rows(self) -> List[Any]:
+        return [self.definition.row_builder(entry) for entry in self.records]
+
+    def clear(self) -> None:
+        self.records.clear()
+
+
 class DataPersister:
     def __init__(self):
         self.pool = None
-        self.book_buffer = []
-        self.mark_buffer = []
-        self.oi_buffer = []
-        self.indicator_buffer = []
-        self.signal_buffer = []
-        self.obi_buffer = []
         self._trade_warning_emitted = False
-        
+
         self.batch_size = 500
         self.flush_interval = 5
         self.max_buffer_size = 5000
         self.running = False
         self._auto_task = None
+        self.buffers = self._build_buffer_registry()
+        self.book_buffer = self.buffers['book'].records
+        self.mark_buffer = self.buffers['mark'].records
+        self.oi_buffer = self.buffers['oi'].records
+        self.indicator_buffer = self.buffers['indicator'].records
+        self.signal_buffer = self.buffers['signal'].records
+        self.obi_buffer = self.buffers['obi'].records
         
     async def initialize(self):
         db_config = config.database
@@ -53,139 +79,64 @@ class DataPersister:
         return
             
     async def insert_book_snapshot(self, snapshot: Dict[str, Any]):
-        self.book_buffer.append(snapshot)
-        self._enforce_bounds('book')
-        if len(self.book_buffer) >= self.batch_size:
-            await self.flush_books()
-            
+        await self._append('book', snapshot)
+
     async def insert_mark_price(self, mark: Dict[str, Any]):
-        self.mark_buffer.append(mark)
-        self._enforce_bounds('mark')
-        if len(self.mark_buffer) >= self.batch_size:
-            await self.flush_marks()
-            
+        await self._append('mark', mark)
+
     async def insert_open_interest(self, oi: Dict[str, Any]):
-        self.oi_buffer.append(oi)
-        self._enforce_bounds('oi')
-        if len(self.oi_buffer) >= self.batch_size:
-            await self.flush_oi()
-            
+        await self._append('oi', oi)
+
     async def insert_indicator_state(self, indicator: Dict[str, Any]):
-        self.indicator_buffer.append(indicator)
-        self._enforce_bounds('indicator')
-        if len(self.indicator_buffer) >= self.batch_size:
-            await self.flush_indicators()
+        await self._append('indicator', indicator)
 
     async def insert_signal(self, signal: Dict[str, Any]):
-        self.signal_buffer.append(signal)
-        self._enforce_bounds('signal')
-        if len(self.signal_buffer) >= self.batch_size:
-            await self.flush_signals()
+        await self._append('signal', signal)
 
     async def insert_obi_snapshot(self, obi_snapshot: Dict[str, Any]):
-        self.obi_buffer.append(obi_snapshot)
-        self._enforce_bounds('obi')
-        if len(self.obi_buffer) >= self.batch_size:
-            await self.flush_obi_snapshots()
+        await self._append('obi', obi_snapshot)
 
-    def _enforce_bounds(self, which: str):
-        buf = None
-        if which == 'book':
-            buf = self.book_buffer
-        elif which == 'mark':
-            buf = self.mark_buffer
-        elif which == 'oi':
-            buf = self.oi_buffer
-        elif which == 'indicator':
-            buf = self.indicator_buffer
-        elif which == 'signal':
-            buf = self.signal_buffer
-        elif which == 'obi':
-            buf = self.obi_buffer
-        if buf is None:
-            return
-        if len(buf) > self.max_buffer_size:
-            # Drop oldest 20% to relieve pressure
-            drop_n = max(int(self.max_buffer_size * 0.2), 1)
-            del buf[:drop_n]
-            try:
-                # Mark degradation explicitly
-                from api.metrics import metrics
-                metrics.mark_microstructure(False, 'backpressure_drop')
-            except Exception:
-                pass
-            
-    async def flush_books(self):
-        if not self.book_buffer:
-            return
-            
-        async with self.pool.acquire() as conn:
-            await conn.executemany(
+    def _build_buffer_registry(self) -> Dict[str, PersistenceBuffer]:
+        return {
+            'book': PersistenceBuffer(BufferDefinition(
+                'book',
                 '''INSERT INTO book_snapshots (symbol, ts, bids_json, asks_json, last_update_id)
                    VALUES ($1, $2, $3, $4, $5)
                    ON CONFLICT (symbol, ts) DO NOTHING''',
-                [
-                    (
-                        b['symbol'],
-                        datetime.fromtimestamp(b['timestamp'] / 1000),
-                        json.dumps(b['bids']),
-                        json.dumps(b['asks']),
-                        int(b.get('last_update_id', 0)) if b.get('last_update_id') else 0
-                    )
-                    for b in self.book_buffer
-                ]
-            )
-        self.book_buffer.clear()
-        
-    async def flush_marks(self):
-        if not self.mark_buffer:
-            return
-            
-        async with self.pool.acquire() as conn:
-            await conn.executemany(
+                lambda b: (
+                    b['symbol'],
+                    datetime.fromtimestamp(b['timestamp'] / 1000),
+                    json.dumps(b['bids']),
+                    json.dumps(b['asks']),
+                    int(b.get('last_update_id', 0) or 0),
+                ),
+            )),
+            'mark': PersistenceBuffer(BufferDefinition(
+                'mark',
                 '''INSERT INTO mark_price (symbol, ts, mark_price, funding_rate)
                    VALUES ($1, $2, $3, $4)
                    ON CONFLICT (symbol, ts) DO NOTHING''',
-                [
-                    (
-                        m['symbol'],
-                        datetime.fromtimestamp(m['timestamp'] / 1000),
-                        m['mark_price'],
-                        m.get('funding_rate')
-                    )
-                    for m in self.mark_buffer
-                ]
-            )
-        self.mark_buffer.clear()
-        
-    async def flush_oi(self):
-        if not self.oi_buffer:
-            return
-            
-        async with self.pool.acquire() as conn:
-            await conn.executemany(
+                lambda m: (
+                    m['symbol'],
+                    datetime.fromtimestamp(m['timestamp'] / 1000),
+                    m['mark_price'],
+                    m.get('funding_rate'),
+                ),
+            )),
+            'oi': PersistenceBuffer(BufferDefinition(
+                'oi',
                 '''INSERT INTO open_interest (symbol, ts, oi_value)
                    VALUES ($1, $2, $3)
                    ON CONFLICT (symbol, ts) DO NOTHING''',
-                [
-                    (
-                        o['symbol'],
-                        datetime.fromtimestamp(o['timestamp'] / 1000),
-                        o['openInterest']
-                    )
-                    for o in self.oi_buffer
-                ]
-            )
-        self.oi_buffer.clear()
-
-    async def flush_obi_snapshots(self):
-        if not self.obi_buffer:
-            return
-
-        async with self.pool.acquire() as conn:
-            try:
-                await conn.executemany(
-                    '''INSERT INTO obi_regime_stats 
+                lambda o: (
+                    o['symbol'],
+                    datetime.fromtimestamp(o['timestamp'] / 1000),
+                    o['openInterest'],
+                ),
+            )),
+            'obi': PersistenceBuffer(BufferDefinition(
+                'obi',
+                '''INSERT INTO obi_regime_stats
                        (symbol, ts, obi, obi_z, bid_qty, ask_qty, depth_levels, total_depth, best_bid, best_ask, mid_price, spread)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                        ON CONFLICT (symbol, ts) DO UPDATE SET
@@ -199,70 +150,50 @@ class DataPersister:
                            best_ask = EXCLUDED.best_ask,
                            mid_price = EXCLUDED.mid_price,
                            spread = EXCLUDED.spread''',
-                    [
-                        (
-                            snap['symbol'],
-                            datetime.fromtimestamp(snap['timestamp'] / 1000),
-                            snap.get('obi'),
-                            snap.get('obi_z'),
-                            snap.get('bid_qty'),
-                            snap.get('ask_qty'),
-                            snap.get('depth'),
-                            snap.get('total_depth'),
-                            snap.get('best_bid'),
-                            snap.get('best_ask'),
-                            snap.get('mid_price'),
-                            snap.get('spread')
-                        )
-                        for snap in self.obi_buffer
-                    ]
-                )
-            except Exception as e:
-                logger.error("OBI snapshot flush failed: %s", e)
-        self.obi_buffer.clear()
-        
-    async def flush_indicators(self):
-        if not self.indicator_buffer:
-            return
-            
-        async with self.pool.acquire() as conn:
-            await conn.executemany(
-                '''INSERT INTO indicator_state 
+                lambda snap: (
+                    snap['symbol'],
+                    datetime.fromtimestamp(snap['timestamp'] / 1000),
+                    snap.get('obi'),
+                    snap.get('obi_z'),
+                    snap.get('bid_qty'),
+                    snap.get('ask_qty'),
+                    snap.get('depth'),
+                    snap.get('total_depth'),
+                    snap.get('best_bid'),
+                    snap.get('best_ask'),
+                    snap.get('mid_price'),
+                    snap.get('spread'),
+                ),
+            )),
+            'indicator': PersistenceBuffer(BufferDefinition(
+                'indicator',
+                '''INSERT INTO indicator_state
                    (symbol, ts, rsi, macd, macd_signal, macd_hist, obv, ad_line, realized_vol, cvd, obi, obi_z, obi_bid_qty, obi_ask_qty, obi_depth_levels)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                    ON CONFLICT (symbol, ts) DO NOTHING''',
-                [
-                    (
-                        i['symbol'],
-                        datetime.fromtimestamp(i['timestamp'] / 1000),
-                        i.get('rsi'),
-                        i.get('macd'),
-                        i.get('macd_signal'),
-                        i.get('macd_hist'),
-                        i.get('obv'),
-                        i.get('ad_line'),
-                        i.get('realized_vol'),
-                        i.get('cvd'),
-                        i.get('obi'),
-                        i.get('obi_z'),
-                        i.get('obi_bid_qty'),
-                        i.get('obi_ask_qty'),
-                        i.get('obi_depth_levels')
-                    )
-                    for i in self.indicator_buffer
-                ]
-            )
-        self.indicator_buffer.clear()
-        
-    async def flush_signals(self):
-        if not self.signal_buffer:
-            return
-            
-        async with self.pool.acquire() as conn:
-            await conn.executemany(
-                '''INSERT INTO signals 
-                   (signal_id, symbol, ts, side, level_price, zone_low, zone_high, 
-                    score, state, divergences, entry_price, stop_price, 
+                lambda i: (
+                    i['symbol'],
+                    datetime.fromtimestamp(i['timestamp'] / 1000),
+                    i.get('rsi'),
+                    i.get('macd'),
+                    i.get('macd_signal'),
+                    i.get('macd_hist'),
+                    i.get('obv'),
+                    i.get('ad_line'),
+                    i.get('realized_vol'),
+                    i.get('cvd'),
+                    i.get('obi'),
+                    i.get('obi_z'),
+                    i.get('obi_bid_qty'),
+                    i.get('obi_ask_qty'),
+                    i.get('obi_depth_levels'),
+                ),
+            )),
+            'signal': PersistenceBuffer(BufferDefinition(
+                'signal',
+                '''INSERT INTO signals
+                   (signal_id, symbol, ts, side, level_price, zone_low, zone_high,
+                    score, state, divergences, entry_price, stop_price,
                     target_price, exit_price, pnl, order_id, filled_qty, avg_fill_price, feature_vector)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
                    ON CONFLICT (signal_id) DO UPDATE SET
@@ -276,40 +207,82 @@ class DataPersister:
                    filled_qty = EXCLUDED.filled_qty,
                    avg_fill_price = EXCLUDED.avg_fill_price,
                    feature_vector = EXCLUDED.feature_vector''',
-                [
-                    (
-                        s['signal_id'],
-                        s['symbol'],
-                        datetime.fromtimestamp(s['timestamp'] / 1000),
-                        s['side'],
-                        s['level_price'],
-                        s['zone_low'],
-                        s['zone_high'],
-                        s['score'],
-                        s['state'],
-                        json.dumps(s.get('divergences', {})),
-                        s.get('entry_price'),
-                        s.get('stop_price'),
-                        s.get('target_price'),
-                        s.get('exit_price'),
-                        s.get('pnl'),
-                        s.get('order_id'),
-                        s.get('filled_qty'),
-                        s.get('avg_fill_price'),
-                        json.dumps(s.get('feature_vector', {}))
-                    )
-                    for s in self.signal_buffer
-                ]
-            )
-        self.signal_buffer.clear()
-        
+                lambda s: (
+                    s['signal_id'],
+                    s['symbol'],
+                    datetime.fromtimestamp(s['timestamp'] / 1000),
+                    s['side'],
+                    s['level_price'],
+                    s['zone_low'],
+                    s['zone_high'],
+                    s['score'],
+                    s['state'],
+                    json.dumps(s.get('divergences', {})),
+                    s.get('entry_price'),
+                    s.get('stop_price'),
+                    s.get('target_price'),
+                    s.get('exit_price'),
+                    s.get('pnl'),
+                    s.get('order_id'),
+                    s.get('filled_qty'),
+                    s.get('avg_fill_price'),
+                    json.dumps(s.get('feature_vector', {})),
+                ),
+            )),
+        }
+
+    async def _append(self, name: str, payload: Dict[str, Any]) -> None:
+        buffer = self.buffers[name]
+        buffer.append(payload)
+        self._enforce_bounds(name)
+        if len(buffer.records) >= self.batch_size:
+            await self._flush_buffer(name)
+
+    def _enforce_bounds(self, name: str):
+        buf = self.buffers[name].records
+        if len(buf) > self.max_buffer_size:
+            drop_n = max(int(self.max_buffer_size * 0.2), 1)
+            del buf[:drop_n]
+            try:
+                from api.metrics import metrics
+                metrics.mark_microstructure(False, 'backpressure_drop')
+            except Exception:
+                pass
+
+    async def _flush_buffer(self, name: str):
+        buffer = self.buffers[name]
+        if not buffer.records:
+            return
+        rows = buffer.build_rows()
+        async with self.pool.acquire() as conn:
+            try:
+                await conn.executemany(buffer.definition.sql, rows)
+            except Exception as exc:
+                logger.error("Flush failed for %s: %s", name, exc)
+            finally:
+                buffer.clear()
+
+    async def flush_books(self):
+        await self._flush_buffer('book')
+
+    async def flush_marks(self):
+        await self._flush_buffer('mark')
+
+    async def flush_oi(self):
+        await self._flush_buffer('oi')
+
+    async def flush_obi_snapshots(self):
+        await self._flush_buffer('obi')
+
+    async def flush_indicators(self):
+        await self._flush_buffer('indicator')
+
+    async def flush_signals(self):
+        await self._flush_buffer('signal')
+
     async def flush_all(self):
-        await self.flush_books()
-        await self.flush_marks()
-        await self.flush_oi()
-        await self.flush_obi_snapshots()
-        await self.flush_indicators()
-        await self.flush_signals()
+        for name in self.buffers.keys():
+            await self._flush_buffer(name)
         
     async def auto_flush_loop(self):
         self.running = True

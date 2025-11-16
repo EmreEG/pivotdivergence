@@ -1,105 +1,86 @@
 import asyncio
 import logging
-from typing import Dict, Callable
+from typing import Awaitable, Callable, Dict, Mapping, Optional
 
 from ingest.websocket_client import WebSocketClient
 from ingest.rest_poller import RESTPoller
 
 logger = logging.getLogger(__name__)
 
+Handler = Callable[[Dict], Awaitable[None]]
+
+
 class MarketDataManager:
+    """Route websocket and REST payloads to registered async handlers."""
+
+    _WS_EVENT_MAP = {
+        'trade': 'trade',
+        'orderbook': 'orderbook',
+        'ticker': 'ticker',
+        'gap_detected': 'gap',
+        'latency_alert': 'latency',
+        'dropped_event': 'drop',
+        'kill_switch': 'kill_switch',
+        'user_order': 'user_order',
+    }
+
+    _ALIASES = {
+        'trade_handler': 'trade',
+        'orderbook_handler': 'orderbook',
+        'ticker_handler': 'ticker',
+        'oi_handler': 'oi',
+        'gap_handler': 'gap',
+        'latency_handler': 'latency',
+        'drop_handler': 'drop',
+        'kill_switch_handler': 'kill_switch',
+        'user_order_handler': 'user_order',
+    }
+
     def __init__(self, symbol: str, ws_client: WebSocketClient, rest_poller: RESTPoller):
         self.symbol = symbol
         self.ws_client = ws_client
         self.rest_poller = rest_poller
-
-        self._trade_handler: Callable[[Dict], asyncio.Task] = None
-        self._orderbook_handler: Callable[[Dict], asyncio.Task] = None
-        self._ticker_handler: Callable[[Dict], asyncio.Task] = None
-        self._oi_handler: Callable[[Dict], asyncio.Task] = None
-        self._gap_handler: Callable[[float], asyncio.Task] = None
-        self._latency_handler: Callable[[float], asyncio.Task] = None
-        self._drop_handler: Callable[[str], asyncio.Task] = None
-        self._kill_switch_handler: Callable[[str], asyncio.Task] = None
-        self._user_order_handler: Callable[[Dict], asyncio.Task] = None
+        self._handlers: Dict[str, Handler] = {}
 
         self._register_ws_handlers()
         self._register_rest_handlers()
 
-    def _register_ws_handlers(self):
-        handlers = [
-            ('trade', self._handle_trade),
-            ('orderbook', self._handle_orderbook),
-            ('ticker', self._handle_ticker),
-            ('gap_detected', self._handle_gap),
-            ('latency_alert', self._handle_latency_event),
-            ('dropped_event', self._handle_drop),
-            ('kill_switch', self._handle_kill_switch),
-            ('user_order', self._handle_user_order)
-        ]
-        for event_name, handler in handlers:
-            self.ws_client.register_handler(event_name, handler)
+    def _register_ws_handlers(self) -> None:
+        for ws_event, logical_name in self._WS_EVENT_MAP.items():
+            self.ws_client.register_handler(ws_event, self._build_dispatcher(logical_name))
 
-    def _register_rest_handlers(self):
-        self.rest_poller.register_oi_handler(self._handle_oi)
+    def _register_rest_handlers(self) -> None:
+        self.rest_poller.register_oi_handler(self._build_dispatcher('oi'))
 
-    def register_handlers(
-        self,
-        trade_handler: Callable[[Dict], asyncio.Task],
-        orderbook_handler: Callable[[Dict], asyncio.Task],
-        ticker_handler: Callable[[Dict], asyncio.Task],
-        oi_handler: Callable[[Dict], asyncio.Task],
-        gap_handler: Callable[[float], asyncio.Task],
-        latency_handler: Callable[[float], asyncio.Task],
-        drop_handler: Callable[[str], asyncio.Task],
-        kill_switch_handler: Callable[[str], asyncio.Task],
-        user_order_handler: Callable[[Dict], asyncio.Task],
-    ):
-        self._trade_handler = trade_handler
-        self._orderbook_handler = orderbook_handler
-        self._ticker_handler = ticker_handler
-        self._oi_handler = oi_handler
-        self._gap_handler = gap_handler
-        self._latency_handler = latency_handler
-        self._drop_handler = drop_handler
-        self._kill_switch_handler = kill_switch_handler
-        self._user_order_handler = user_order_handler
+    def register_handlers(self, **handlers: Handler) -> None:
+        """Register async callbacks per logical event name."""
+        normalized = self._normalize_handlers(handlers)
+        for name, handler in normalized.items():
+            if handler is None:
+                continue
+            if not asyncio.iscoroutinefunction(handler) and not asyncio.iscoroutinefunction(getattr(handler, '__call__', None)):
+                # Bound async methods report as regular functions; defer to runtime check
+                pass
+            self._handlers[name] = handler
 
-    async def _handle_trade(self, trade: Dict):
-        if self._trade_handler:
-            await self._trade_handler(trade)
+    def _normalize_handlers(self, handlers: Mapping[str, Handler]) -> Dict[str, Optional[Handler]]:
+        normalized: Dict[str, Optional[Handler]] = {}
+        for key, handler in handlers.items():
+            logical = self._ALIASES.get(key, key)
+            normalized[logical] = handler
+        return normalized
 
-    async def _handle_orderbook(self, orderbook: Dict):
-        if self._orderbook_handler:
-            await self._orderbook_handler(orderbook)
+    def _build_dispatcher(self, logical_name: str) -> Handler:
+        async def _dispatch(payload: Dict):
+            handler = self._handlers.get(logical_name)
+            if not handler:
+                return
+            try:
+                await handler(payload)
+            except Exception:
+                logger.exception("Market data handler %s failed", logical_name)
 
-    async def _handle_ticker(self, ticker: Dict):
-        if self._ticker_handler:
-            await self._ticker_handler(ticker)
-
-    async def _handle_oi(self, oi_data: Dict):
-        if self._oi_handler:
-            await self._oi_handler(oi_data)
-
-    async def _handle_gap(self, gap_duration: float):
-        if self._gap_handler:
-            await self._gap_handler(gap_duration)
-
-    async def _handle_latency_event(self, drift_ms: float):
-        if self._latency_handler:
-            await self._latency_handler(drift_ms)
-
-    async def _handle_drop(self, reason: str):
-        if self._drop_handler:
-            await self._drop_handler(reason)
-
-    async def _handle_kill_switch(self, reason: str):
-        if self._kill_switch_handler:
-            await self._kill_switch_handler(reason)
-
-    async def _handle_user_order(self, order: Dict):
-        if self._user_order_handler:
-            await self._user_order_handler(order)
+        return _dispatch
 
     async def start(self):
         await self.ws_client.start()
