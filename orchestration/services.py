@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from api.alerts import alert_webhook
 from api.metrics import metrics
 from analytics.profile import VolumeProfile
+from strategy.execution_types import OrderTicket
 from strategy.signal_manager import SignalState, Signal
 
 if TYPE_CHECKING:
@@ -855,7 +856,7 @@ class ExecutionRiskSupervisor:
         metrics.record_order_send_latency(time.monotonic() - t0)
 
         if order:
-            order_id = order.get('id', 'unknown')
+            order_id = order.id if isinstance(order, OrderTicket) else str(getattr(order, 'get', lambda *_: 'unknown')('id', 'unknown'))
             logger.info(
                 "Placed %s order %s @ %.2f, qty=%.4f",
                 order_side,
@@ -1168,7 +1169,7 @@ class ExecutionRiskSupervisor:
         metrics.record_order_send_latency(time.monotonic() - t0)
 
         if order:
-            order_id = order.get('id', 'unknown')
+            order_id = order.id if isinstance(order, OrderTicket) else str(getattr(order, 'get', lambda *_: 'unknown')('id', 'unknown'))
             logger.info(
                 "Placed %s stop-market %s @ %.2f, qty=%.4f",
                 order_side,
