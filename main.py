@@ -17,7 +17,6 @@ from analytics.indicators import IndicatorCalculator
 from analytics.swings import ZigZagSwing
 from analytics.profile_shape import ProfileShapeDetector
 from analytics.footprint import FootprintManager
-from analytics.level_registry import LevelRegistry
 from strategy.level_selector import LevelSelector
 from strategy.divergence import DivergenceDetector
 from strategy.signal_manager import SignalManager, SignalState, Signal
@@ -36,8 +35,8 @@ logger = logging.getLogger(__name__)
 
 class TradingSystem:
     """Orchestrate ingest, analytics, signal lifecycle, and execution."""
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, config_obj: Optional[Dict] = None):
+        self.config = config_obj or config
         self.exchange_cfg = self.config.exchange
         self.orderbook_cfg = self.config.orderbook or {}
         self.profile_cfg = self.config.profile or {}
@@ -73,6 +72,7 @@ class TradingSystem:
             WebSocketClient(self.symbol),
             RESTPoller(self.symbol)
         )
+        self.ws_client = self.market_data_manager.ws_client
 
         self.book_manager = OrderBookManager(
             self.symbol,
@@ -87,6 +87,13 @@ class TradingSystem:
             self.symbol,
             self.tick_size
         )
+        self.swing_detector = self.analytics_engine.swing_detector
+
+        self.level_registry = self.analytics_engine.level_registry
+        self.avwap_manager = self.analytics_engine.avwap_manager
+        self.profiles: Dict[str, VolumeProfile] = self.analytics_engine.profiles
+        self.indicators = self.analytics_engine.indicators
+        self.cvd_calc = self.analytics_engine.cvd_calc
 
         from strategy.signal_processor import SignalProcessor
         self.signal_processor = SignalProcessor(self.config)

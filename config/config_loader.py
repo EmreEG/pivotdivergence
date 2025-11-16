@@ -22,5 +22,11 @@ class Config:
     def __getitem__(self, key: str) -> Any:
         return self.config[key]
 
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self.config[name]
+        except KeyError as exc:
+            raise AttributeError(f"Config key '{name}' not found") from exc
+
 # Global config instance
 config_loader = Config()

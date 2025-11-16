@@ -3,13 +3,15 @@ import logging
 import aiohttp
 from typing import Dict
 from config import config
+from config.utils import get_config_section
 
 
 logger = logging.getLogger(__name__)
 
 class AlertWebhook:
     def __init__(self):
-        url = config.monitoring.get('alert_webhook')
+        monitoring_cfg = get_config_section(config, 'monitoring')
+        url = monitoring_cfg.get('alert_webhook')
         # Treat empty or placeholder URLs as disabled
         if url and 'your-webhook-url' not in str(url):
             self.webhook_url = url

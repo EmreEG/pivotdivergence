@@ -1,4 +1,4 @@
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple, cast
 from config import config
 
 
@@ -96,6 +96,7 @@ class DivergenceDetector:
             }
             return False, context
 
+        price1, price2 = swing1["price"], swing2["price"]
         price_move_pct, context = self._build_price_context(
             swing1,
             swing2,
@@ -128,6 +129,7 @@ class DivergenceDetector:
         except Exception:
             return False, None
 
+        price1, price2 = swing1["price"], swing2["price"]
         price_move_pct, context = self._build_price_context(
             swing1,
             swing2,
@@ -159,8 +161,6 @@ class DivergenceDetector:
         swing2: Dict,
         extra: Optional[Dict] = None,
     ) -> Tuple[float, Dict]:
-        from typing import cast
-
         price1, price2 = swing1["price"], swing2["price"]
         price_move_pct = self._price_move_pct(price1, price2)
         context: Dict = {
