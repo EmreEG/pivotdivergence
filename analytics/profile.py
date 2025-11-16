@@ -1,8 +1,11 @@
 import logging
 import math
-import numpy as np
-from typing import Dict, Tuple, Optional
+import logging
 from collections import deque
+from typing import Any, Dict, Tuple, Optional
+
+import numpy as np
+from config import config as global_config
 
 
 
@@ -12,10 +15,16 @@ logger = logging.getLogger(__name__)
 from .histogram import Histogram
 
 class VolumeProfile:
-    def __init__(self, symbol: str, window_seconds: int, config: Dict, bin_width_pct: float = None):
+    def __init__(
+        self,
+        symbol: str,
+        window_seconds: int,
+        config: Optional[Any] = None,
+        bin_width_pct: float = None,
+    ):
         self.symbol = symbol
         self.window_seconds = window_seconds
-        self.config = config
+        self.config = config or global_config
         self.profile_cfg = self.config.get('profile', {})
         self.exchange_cfg = self.config.get('exchange', {})
         self.bin_width_pct = bin_width_pct or self.profile_cfg['bin_width_pct']

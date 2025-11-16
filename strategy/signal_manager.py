@@ -1,9 +1,13 @@
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Dict, List, Optional
+from __future__ import annotations
+
 import time
 import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional, TypedDict
 
+from config import config as global_config
+from config.utils import get_config_section
 
 
 class SignalState(Enum):
@@ -15,13 +19,15 @@ class SignalState(Enum):
     CANCELLED = "cancelled"
     CLOSED = "closed"
 
-@dataclass
-class Transition:
+
+class Transition(TypedDict, total=False):
     signal_id: str
     from_state: str
     to_state: str
     action: str
-    signal: Optional[Signal] = None
+    reason: Optional[str]
+    signal: "Signal"
+
 
 @dataclass
 class Signal:
@@ -101,13 +107,19 @@ class Signal:
 
 from .signal_states import InactiveState, MonitoredState, ArmedState, PartialState
 
+
 class SignalManager:
-    def __init__(self, config: Dict):
+    def __init__(self, config: Optional[Any] = None):
+        self._config_source = config or global_config
         self.active_signals: Dict[str, Signal] = {}
-        self.monitor_distance_pct = config['levels']['monitor_distance_pct']
-        self.confirmation_count = config['divergence']['confirmation_count']
-        self.timeout_s = config['divergence']['timeout_s']
-        execution_cfg = config.get('execution', {})
+
+        levels_cfg = get_config_section(self._config_source, 'levels')
+        divergence_cfg = get_config_section(self._config_source, 'divergence')
+        execution_cfg = get_config_section(self._config_source, 'execution')
+
+        self.monitor_distance_pct = levels_cfg.get('monitor_distance_pct', 0.0)
+        self.confirmation_count = divergence_cfg.get('confirmation_count', 0)
+        self.timeout_s = divergence_cfg.get('timeout_s', 0)
         self.partial_fill_timeout_s = execution_cfg.get('partial_fill_timeout_s', 60)
         self.partial_fill_completion_pct = execution_cfg.get('partial_fill_completion_pct', 0.9)
         
@@ -118,7 +130,8 @@ class SignalManager:
             SignalState.PARTIAL: PartialState,
         }
 
-    def create_signal(self, level: Dict, side: str, zone_low: float, 
+
+    def create_signal(self, level: Dict, side: str, zone_low: float,
                      zone_high: float, current_price: float, symbol: str) -> Signal:
         signal = Signal(
             symbol=symbol,
@@ -145,15 +158,25 @@ class SignalManager:
 
         return transitions
 
-    def _emit_transition(self, transitions: List[Transition], signal_id: str, from_state: str,
-                         to_state: str, action: str, signal: Optional[Signal] = None) -> None:
+    def _emit_transition(
+        self,
+        transitions: List[Transition],
+        signal_id: str,
+        from_state: str,
+        to_state: str,
+        action: str,
+        *,
+        reason: Optional[str] = None,
+        signal: Optional[Signal] = None,
+    ) -> None:
         transitions.append(
             Transition(
                 signal_id=signal_id,
                 from_state=from_state,
                 to_state=to_state,
                 action=action,
-                signal=signal
+                reason=reason,
+                signal=signal,
             )
         )
 
@@ -177,6 +200,7 @@ class SignalManager:
             from_state,
             'cancelled',
             reason,
+            reason=reason,
             signal=signal if include_signal else None,
         )
         
