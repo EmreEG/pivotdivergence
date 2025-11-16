@@ -1,0 +1,160 @@
+exchange:
+  name: binance
+  api_key: ${BINANCE_API_KEY}
+  api_secret: ${BINANCE_API_SECRET}
+  testnet: true
+  symbol: BTCUSDT
+  tick_size: 0.1
+  contract_multiplier: 1
+  
+database:
+  host: localhost
+  port: 5433
+  database: pivotdivergence
+  user: ${DB_USER}
+  password: ${DB_PASSWORD}
+  
+websocket:
+  reconnect_backoff: [1, 2, 4, 8, 30]
+  max_reconnects_per_minute: 3
+  latency_alert_threshold_ms: 5000
+  latency_alert_duration_s: 30
+  ping_interval_s: 10
+  rotation_hours: 23
+  stream_stale_s: 5
+  liveness_grace_s: 2
+
+orderbook:
+  max_depth: 500
+  resync_interval_s: 30
+  stale_tolerance_s: 3
+  compare_depth: 20
+  deviation_threshold_pct: 0.0005
+  
+profile:
+  windows:
+    rolling: [7200, 28800, 86400]
+    session_utc: [[0, 86400], [0, 28800], [28800, 57600], [57600, 86400]]
+  bin_width_pct: 0.0002
+  smooth_window: 5
+  lvn_prominence_multiplier: 1.5
+  hvn_prominence_multiplier: 2.0
+  shelf_gradient_multiplier: 1.0
+  empty_bin_threshold: 0.3
+  flash_crash_pct: 0.03
+  flash_crash_duration_s: 10
+  flash_crash_freeze_s: 60
+  
+swing:
+  zigzag_pct: 0.004
+  history_size: 10
+  bar_interval_s: 60
+  
+scoring:
+  weights:
+    lvn_prominence: 3
+    confluence: 2
+    naked_poc: 2
+    shape_bias: 1
+    distance: 1
+    untouched_age: 1
+    avwap_confluence: 1
+  confluence_radius_pct: 0.0005
+  dedup_spacing_pct: 0.0008
+  top_k_per_side: 6
+  min_order_distance_pct: 0.0025
+  
+divergence:
+  sync_tolerance_bars: 3
+  rsi_delta: 3.0
+  cvd_delta_pct: 0.10
+  obi_z_threshold: 2.0
+  vol_delta_pct: 0.20
+  macd_hist_delta_pct: 0.20
+  oi_slope_period_s: 300
+  confirmation_count: 2
+  timeout_s: 120
+  lookback_window_bars: 50
+  min_price_move_pct: 0.001
+  min_indicator_move: 1.5
+  micro_noise_pct: 0.0005
+  disable_rsi_divergence: false
+  disable_cvd_divergence: false
+  disable_obi_divergence: false
+  
+levels:
+  monitor_distance_pct: 0.0015
+  zone_half_width_pct: 0.0015
+  zone_half_width_shelf_multiplier: 0.5
+  
+execution:
+  post_only: true
+  retry_delay_s: 1
+  retry_tick_offset: 1
+  partial_fill_timeout_s: 60
+  partial_fill_completion_pct: 0.9
+  
+risk:
+  position_size_pct: 0.02
+  max_notional_usd: 5000
+  max_concurrent_per_side: 3
+  stop_atr_multiplier: 0.5
+  stop_zone_multiplier: 0.5
+  atr_period: 14
+  target_min_rr: 1.5
+  trail_avwap_sigma: 1.0
+  funding_threshold_pct: 0.0005
+  funding_size_reduction: 0.5
+  max_drawdown_pct: 0.10
+  no_position_before_funding_min: 5
+  position_epsilon_pct: 0.0005
+  notional_cap_pct: 0.2
+  max_hold_minutes: 30
+
+microstructure:
+  obi_depth_levels: 10
+  contamination_hold_s: 60
+  obi_disable_depth: 10
+  
+breakthrough:
+  min_gap_pct: 0.002
+  obi_z_threshold: 2.5
+  oi_slope_positive_required: true
+  max_per_4h: 1
+  
+backtest:
+  reversal_confirm_pct: 0.003
+  reversal_confirm_bars: 10
+  maker_fee: -0.0002
+  taker_fee: 0.0004
+  funding_interval_s: 28800
+  walk_forward_train_months: 3
+  walk_forward_test_months: 1
+  target_sharpe: 1.5
+  max_drawdown: 0.15
+  robustness_trials: 25
+  robustness_min_sharpe: 0.8
+  
+indicators:
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  obi_lookback: 10
+  realized_vol_window: 60
+  
+monitoring:
+  prometheus_port: 9090
+  prometheus_port_scan: 10
+  metrics_port_file: logs/prometheus_port
+  alert_webhook: ${ALERT_WEBHOOK_URL}
+  latency_budget_ms: 50
+  unsafe_flag_file: logs/UNSAFE_MODE
+  signal_audit_log: logs/signal_audit.jsonl
+  signal_audit_interval_s: 60
+  signal_ack_budget_ms: 750
+  
+api:
+  host: 0.0.0.0
+  port: 8080
+  cors_origins: ["http://localhost:3000"]

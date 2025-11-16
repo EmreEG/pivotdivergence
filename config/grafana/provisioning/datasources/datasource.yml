@@ -1,0 +1,25 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    isDefault: true
+    url: http://prometheus:9090
+    jsonData:
+      timeInterval: 5s
+    editable: false
+  - name: TimescaleDB
+    uid: timescaledb
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    user: postgres
+    secureJsonData:
+      password: $__env{DB_PASSWORD}
+    jsonData:
+      database: pivotdivergence
+      sslmode: disable
+      timescaledb: true
+    editable: false

@@ -1,0 +1,35 @@
+{
+  "database": {
+    "provider": "duckdb",
+    "path": ".chunkhound/chunks.duckdb"
+  },
+  "embedding": {
+    "provider": "voyageai",
+    "api_key": "pa-6TII9jshvF3-sjjxiVGUA_0cG2s5_husNvD4jHPzOtX",
+    "model": "voyage-code-3.5",
+    "rerank_model": "semantic-ranker-default@latest",
+    "rerank_url": "http://localhost:8000/rerank",
+    "rerank_format": "cohere"
+  },
+  "indexing": {
+    "include": [
+      "**/*.py",
+      "**/*.md",
+      "**/*.txt",
+      "**/*.json",
+      "**/*.toml",
+      "**/*.yml",
+      "**/*.yaml"
+    ]
+  },
+  "llm": {
+    "provider": "codex-cli",
+    "utility_model": "gpt-5.1-codex",
+    "synthesis_model": "gpt-5.1",
+    "codex_reasoning_effort_utility": "medium",
+    "codex_reasoning_effort_synthesis": "medium",
+    "timeout": 120,
+    "max_retries": 3
+  },
+  "debug": false
+}

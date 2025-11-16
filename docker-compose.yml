@@ -1,0 +1,44 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: pivotdivergence-db
+    environment:
+      POSTGRES_DB: pivotdivergence
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    ports:
+      - "5433:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./config/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pivotdivergence-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      DB_PASSWORD: ${DB_PASSWORD:-changeme}
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./config/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pivotdivergence-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  timescaledb_data:
+  grafana_data:

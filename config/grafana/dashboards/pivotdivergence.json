@@ -1,0 +1,132 @@
+{
+  "id": null,
+  "uid": "pivotdivergence",
+  "title": "Pivot Divergence Overview",
+  "tags": ["pivotdivergence"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {"list": []},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Current Price",
+      "id": 1,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 2}, "overrides": []},
+      "targets": [{"expr": "current_price", "legendFormat": "price", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "CVD",
+      "id": 2,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"decimals": 2}, "overrides": []},
+      "targets": [{"expr": "cvd_current", "legendFormat": "cvd", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Trades/sec",
+      "id": 3,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}},
+      "targets": [{"expr": "rate(trades_processed_total[1m])", "legendFormat": "trades/s", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+    },
+    {
+      "type": "timeseries",
+      "title": "Orderbook Updates/sec",
+      "id": 4,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "rate(orderbook_updates_total[1m])", "legendFormat": "book/s", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+    },
+    {
+      "type": "timeseries",
+      "title": "OBI Z-Score",
+      "id": 5,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "obi_z_current", "legendFormat": "obi_z", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+    },
+    {
+      "type": "timeseries",
+      "title": "RSI",
+      "id": 6,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "min": -100,
+          "max": 100
+        }
+      },
+      "targets": [{"expr": "rsi_normalized", "legendFormat": "rsi_norm", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+    },
+    {
+      "type": "stat",
+      "title": "Reconnects (1h)",
+      "id": 7,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "increase(websocket_reconnects_total[1h])", "legendFormat": "reconnects", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 20}
+    },
+    {
+      "type": "timeseries",
+      "title": "Account Equity (Paper/Live)",
+      "id": 9,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 2}, "overrides": []},
+      "targets": [
+        {
+          "expr": "account_equity",
+          "legendFormat": "equity",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 6, "y": 20}
+    },
+    {
+      "type": "timeseries",
+      "title": "Realized PnL",
+      "id": 10,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 2}, "overrides": []},
+      "targets": [
+        {
+          "expr": "pnl_realized_total",
+          "legendFormat": "realized_pnl",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 18, "y": 20}
+    },
+    {
+      "type": "table",
+      "title": "Closed Trades (Signals)",
+      "id": 11,
+      "datasource": {"type": "postgres", "uid": "timescaledb"},
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "format": "table",
+          "group": [],
+          "rawSql": "SELECT\n  ts AS \"time\",\n  symbol,\n  side,\n  state,\n  entry_price,\n  stop_price,\n  target_price,\n  exit_price,\n  pnl,\n  filled_qty,\n  avg_fill_price,\n  order_id\nFROM signals\nWHERE pnl IS NOT NULL\n  AND $__timeFilter(ts)\nORDER BY ts DESC\nLIMIT 200;",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 28}
+    }
+  ]
+}

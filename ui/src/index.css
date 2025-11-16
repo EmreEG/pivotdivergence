@@ -1,0 +1,189 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #0d1117;
+  color: #c9d1d9;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.header {
+  background-color: #161b22;
+  padding: 16px 24px;
+  border-bottom: 1px solid #30363d;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.header h1 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #58a6ff;
+}
+
+.status {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  font-size: 14px;
+}
+
+.status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #3fb950;
+}
+
+.status-indicator.disconnected {
+  background-color: #f85149;
+}
+
+.main-container {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.chart-container {
+  flex: 1;
+  padding: 16px;
+  background-color: #0d1117;
+  box-sizing: border-box;
+}
+
+.chart-surface {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.profile-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.sidebar {
+  width: 350px;
+  background-color: #161b22;
+  border-left: 1px solid #30363d;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.section {
+  margin-bottom: 24px;
+}
+
+.section h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #58a6ff;
+}
+
+.card {
+  background-color: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.card-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-weight: 500;
+}
+
+.badge.long {
+  background-color: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+}
+
+.badge.short {
+  background-color: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+}
+
+.badge.armed {
+  background-color: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+}
+
+.badge.monitored {
+  background-color: rgba(187, 128, 9, 0.15);
+  color: #d29922;
+}
+
+.card-details {
+  font-size: 12px;
+  color: #8b949e;
+  line-height: 1.5;
+}
+
+.card-details div {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.indicator-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.indicator-item {
+  background-color: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.indicator-label {
+  font-size: 11px;
+  color: #8b949e;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.indicator-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: #c9d1d9;
+}
