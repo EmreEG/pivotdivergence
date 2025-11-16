@@ -192,32 +192,52 @@ class MarketEventService:
         self.microstructure.mark_contaminated(f"message_loss_{reason}")
 
 
-class AnalyticsDispatcher:
+class AnalyticsBarService:
     def __init__(self, system: 'TradingSystem'):
         self.system = system
+        self._run_task: Optional[asyncio.Task] = None
+        self._latest_rsi: Optional[float] = None
+        self._current_volatility: float = system.current_volatility
+        self._last_swing: Optional[Dict] = None
 
-    async def run(self):
+    async def start(self):
+        if self._run_task is None:
+            self._run_task = asyncio.create_task(self._run())
+
+    async def stop(self):
+        if self._run_task is not None:
+            self._run_task.cancel()
+            await asyncio.gather(self._run_task, return_exceptions=True)
+            self._run_task = None
+
+    async def _run(self):
         system = self.system
         while system.running:
-            await asyncio.sleep(60)
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                break
 
             if system.current_price is None:
                 continue
 
-            system.analytics_engine.on_bar(system.current_price, time.time())
+            now = time.time()
+            system.analytics_engine.on_bar(system.current_price, now)
 
             rsi = system.analytics_engine.indicators.get_rsi()
+            self._latest_rsi = rsi
             if rsi is not None:
                 metrics.update_rsi(rsi)
 
             realized_vol = system.analytics_engine.indicators.get_realized_volatility()
             if realized_vol is not None:
+                self._current_volatility = realized_vol
                 system.current_volatility = realized_vol
                 metrics.update_realized_volatility(realized_vol)
 
             new_swing = system.analytics_engine.swing_detector.update(
                 system.current_price,
-                time.time(),
+                now,
                 rsi,
                 system.analytics_engine.cvd_calc.get_cvd(),
                 system.analytics_engine.obi_calc.get_obi_z_score(),
@@ -226,6 +246,7 @@ class AnalyticsDispatcher:
             )
 
             if new_swing:
+                self._last_swing = new_swing
                 logger.info(
                     "New swing %s at %.2f",
                     new_swing["type"],
@@ -254,16 +275,32 @@ class AnalyticsDispatcher:
             indicator_snapshot = system.analytics_engine.get_indicator_snapshot()
             await system.persistence_coordinator.persist_indicator_state(indicator_snapshot)
 
+    def get_current_rsi(self) -> Optional[float]:
+        return self._latest_rsi
 
-class SignalLifecycleCoordinator:
-    def __init__(self, system: 'TradingSystem'):
+    def get_current_volatility(self) -> float:
+        if self._current_volatility is not None:
+            return self._current_volatility
+        return self.system.current_volatility
+
+    def get_last_swing(self) -> Optional[Dict]:
+        return self._last_swing
+
+    def get_recent_swings(self, count: int = 10) -> List[Dict]:
+        return self.system.analytics_engine.swing_detector.get_last_n_swings(count)
+
+
+class SignalLifecycleService:
+    def __init__(self, system: 'TradingSystem', bar_service: AnalyticsBarService):
         self.system = system
+        self.bar_service = bar_service
 
     def zone_half_width_pct(self) -> float:
         system = self.system
         base_pct = system.levels_cfg.get('zone_half_width_pct', 0.0015)
-        if system.current_volatility > 0.02:
-            return base_pct * (1 + system.current_volatility / 0.01)
+        current_vol = self.bar_service.get_current_volatility()
+        if current_vol > 0.02:
+            return base_pct * (1 + current_vol / 0.01)
         return base_pct
 
     def has_conflicting_signal(self, price: float) -> bool:
@@ -360,7 +397,7 @@ class SignalLifecycleCoordinator:
 
             naked_pocs = system.analytics_engine.poc_tracker.get_naked_pocs()
             avwaps = system.analytics_engine.avwap_manager.get_all()
-            swings = system.analytics_engine.swing_detector.get_last_n_swings(10)
+            swings = self.bar_service.get_recent_swings(10)
 
             long_levels, short_levels = system.signal_processor.select_levels(
                 candidate_levels,
@@ -401,7 +438,7 @@ class SignalLifecycleCoordinator:
                         swings_low_pair,
                         obi_z,
                         oi_slope,
-                        system.current_volatility,
+                        self.bar_service.get_current_volatility(),
                         suppress_obi,
                     )
                     divergence_results[signal_id] = confirmations
@@ -877,7 +914,7 @@ class ExecutionRiskSupervisor:
             'divergences': signal.divergences,
             'cvd_unstable': not system.cvd_calc.is_stable(),
             'microstructure_degraded': system.microstructure_monitor.is_contaminated(),
-            'volatility': system.current_volatility,
+            'volatility': self.bar_service.get_current_volatility(),
             'requested_qty': signal.requested_qty,
             'requested_notional': signal.requested_notional,
             'naked_poc_count': len(system.analytics_engine.poc_tracker.get_naked_pocs()),

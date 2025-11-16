@@ -32,8 +32,8 @@ from monitoring.microstructure import MicrostructureHealthMonitor
 from orchestration.persistence import PersistenceCoordinator
 from orchestration.services import (
     MarketEventService,
-    AnalyticsDispatcher,
-    SignalLifecycleCoordinator,
+    AnalyticsBarService,
+    SignalLifecycleService,
     ExecutionRiskSupervisor,
 )
 
@@ -121,8 +121,8 @@ class TradingSystem:
             self.microstructure_monitor,
             self.persistence_coordinator,
         )
-        self.analytics_dispatcher = AnalyticsDispatcher(self)
-        self.signal_coordinator = SignalLifecycleCoordinator(self)
+        self.analytics_bar_service = AnalyticsBarService(self)
+        self.signal_service = SignalLifecycleService(self, self.analytics_bar_service)
         self.execution_supervisor = ExecutionRiskSupervisor(self)
 
         self.persistence_coordinator.load_avwap_snapshot()
@@ -186,11 +186,12 @@ class TradingSystem:
         except Exception:
             pass
 
+        await self.analytics_bar_service.start()
+
         tasks = [
             asyncio.create_task(self.market_data_manager.start()),
             asyncio.create_task(self.persister.start()),
-            asyncio.create_task(self.analytics_dispatcher.run()),
-            asyncio.create_task(self.signal_coordinator.process_levels_and_signals()),
+            asyncio.create_task(self.signal_service.process_levels_and_signals()),
         ]
         await self.execution_supervisor.start_audits()
 
@@ -201,6 +202,7 @@ class TradingSystem:
         
     async def stop(self):
         self.running = False
+        await self.analytics_bar_service.stop()
         await self.market_data_manager.stop()
         await self.persister.stop()
         await self.execution_supervisor.stop_audits()
