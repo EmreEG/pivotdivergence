@@ -37,17 +37,17 @@ async def _run_system():
         print("\n=== System Test Results ===\n")
         print(f"✓ WebSocket client: {'Connected' if system.ws_client else 'Failed'}")
         print(f"✓ Current price: ${system.current_price:.2f}" if system.current_price else "✗ No price data")
-        print(f"✓ Profiles: {len(system.profiles)} windows")
-        print(f"✓ Swing detector: {system.swing_detector.bar_count} bars processed")
+        print(f"✓ Profiles: {len(system.profile_service.profiles)} windows")
+        print(f"✓ Swing detector: {system.swing_service.detector.bar_count} bars processed")
 
-        swings = system.swing_detector.get_last_n_swings(5)
+        swings = system.swing_service.get_last_n_swings(5)
         print(f"✓ Swings detected: {len(swings)}")
 
-        indicators = system.indicators.to_dict()
+        indicators = system.order_flow.indicators.to_dict()
         if indicators.get('rsi'):
             print(f"✓ RSI: {indicators['rsi']:.2f}")
 
-        print(f"✓ CVD: {system.cvd_calc.get_cvd():.2f}")
+        print(f"✓ CVD: {system.order_flow.get_cvd():.2f}")
 
         signals = system.signal_manager.get_active_signals()
         print(f"✓ Active signals: {len(signals)}")
