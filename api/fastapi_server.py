@@ -257,7 +257,7 @@ async def get_footprint():
 @app.post("/api/kill_switch")
 async def trigger_kill_switch():
     if trading_system:
-        await trading_system.handle_kill_switch('manual')
+        await trading_system.execution_supervisor.handle_kill_switch('manual')
         return {"status": "Kill switch triggered", "timestamp": datetime.utcnow().isoformat()}
     return {"error": "Trading system not initialized"}
 

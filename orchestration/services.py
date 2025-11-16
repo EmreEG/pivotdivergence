@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class MarketEventService:
+class IngestCoordinator:
     def __init__(self, system: 'TradingSystem'):
         self.system = system
 
@@ -68,7 +68,7 @@ class MarketEventService:
         except Exception as exc:
             logger.error("Order book resync failed: %s", exc)
             if not system.execution_manager.paper_mode:
-                await system.execution_service.handle_kill_switch('orderbook_resync_failed')
+                await system.execution_supervisor.handle_kill_switch('orderbook_resync_failed')
             else:
                 self.mark_microstructure_contaminated('orderbook_resync_failed')
 
@@ -255,7 +255,7 @@ class MarketEventService:
         if oi_data is None:
             if not system.execution_manager.paper_mode:
                 logger.error("Open interest fetch failed; triggering kill switch")
-                await system.execution_service.handle_kill_switch('oi_fetch_failed')
+                await system.execution_supervisor.handle_kill_switch('oi_fetch_failed')
             return
 
         system.analytics_engine.on_oi(oi_data)
@@ -276,14 +276,77 @@ class MarketEventService:
         await alert_webhook.latency_alert(drift_ms)
         if not system.execution_manager.paper_mode:
             if drift_ms > system.monitoring_cfg.get('latency_budget_ms', 50):
-                await system.execution_service.handle_kill_switch('latency_drift')
+                await system.execution_supervisor.handle_kill_switch('latency_drift')
 
     async def handle_drop(self, reason: str):
         metrics.record_drop(reason)
         self.mark_microstructure_contaminated(f"message_loss_{reason}")
 
 
-class SignalLifecycleService:
+class AnalyticsDispatcher:
+    def __init__(self, system: 'TradingSystem'):
+        self.system = system
+
+    async def run(self):
+        system = self.system
+        while system.running:
+            await asyncio.sleep(60)
+
+            if system.current_price is None:
+                continue
+
+            system.analytics_engine.on_bar(system.current_price, time.time())
+
+            rsi = system.analytics_engine.indicators.get_rsi()
+            if rsi is not None:
+                metrics.update_rsi(rsi)
+
+            realized_vol = system.analytics_engine.indicators.get_realized_volatility()
+            if realized_vol is not None:
+                system.current_volatility = realized_vol
+                metrics.update_realized_volatility(realized_vol)
+
+            new_swing = system.analytics_engine.swing_detector.update(
+                system.current_price,
+                time.time(),
+                rsi,
+                system.analytics_engine.cvd_calc.get_cvd(),
+                system.analytics_engine.obi_calc.get_obi_z_score(),
+                macd_hist=system.analytics_engine.indicators.get_macd().get('histogram'),
+                volume=system.analytics_engine.footprint_manager.get_current_bar().total_volume,
+            )
+
+            if new_swing:
+                logger.info(
+                    "New swing %s at %.2f",
+                    new_swing["type"],
+                    new_swing["price"],
+                )
+
+                anchor_id = f"swing_{new_swing['type']}_{int(new_swing['timestamp'])}"
+                system.analytics_engine.avwap_manager.create_avwap(anchor_id, new_swing['timestamp'], f"swing_{new_swing['type']}")
+                system.ingest_coordinator.persist_avwap_snapshot()
+
+                event_profile = VolumeProfile(system.symbol, 86400)
+                event_profile.set_tick_size(system.tick_size)
+                event_profile.anchor_ts = new_swing['timestamp']
+                system.analytics_engine.event_anchors[anchor_id] = event_profile
+
+            mono_now = time.monotonic()
+            for stream, last_seen in system.market_data_manager.ws_client.stream_last_seen.items():
+                lag = max(0.0, mono_now - float(last_seen))
+                metrics.update_stream_lag(stream, lag)
+            metrics.update_queue_depth('book', len(system.persister.book_buffer))
+            metrics.update_queue_depth('mark', len(system.persister.mark_buffer))
+            metrics.update_queue_depth('oi', len(system.persister.oi_buffer))
+            metrics.update_queue_depth('indicator', len(system.persister.indicator_buffer))
+            metrics.update_queue_depth('signal', len(system.persister.signal_buffer))
+
+            indicator_snapshot = system.analytics_engine.get_indicator_snapshot()
+            await system.persister.insert_indicator_state(indicator_snapshot)
+
+
+class SignalLifecycleCoordinator:
     def __init__(self, system: 'TradingSystem'):
         self.system = system
 
@@ -365,64 +428,6 @@ class SignalLifecycleService:
             return False
         return time.time() < system.microstructure_contaminated_until
 
-    async def process_bar(self):
-        system = self.system
-        while system.running:
-            await asyncio.sleep(60)
-
-            if system.current_price is None:
-                continue
-
-            system.analytics_engine.on_bar(system.current_price, time.time())
-
-            rsi = system.analytics_engine.indicators.get_rsi()
-            if rsi is not None:
-                metrics.update_rsi(rsi)
-
-            realized_vol = system.analytics_engine.indicators.get_realized_volatility()
-            if realized_vol is not None:
-                system.current_volatility = realized_vol
-                metrics.update_realized_volatility(realized_vol)
-
-            new_swing = system.analytics_engine.swing_detector.update(
-                system.current_price,
-                time.time(),
-                rsi,
-                system.analytics_engine.cvd_calc.get_cvd(),
-                system.analytics_engine.obi_calc.get_obi_z_score(),
-                macd_hist=system.analytics_engine.indicators.get_macd().get('histogram'),
-                volume=system.analytics_engine.footprint_manager.get_current_bar().total_volume,
-            )
-
-            if new_swing:
-                logger.info(
-                    "New swing %s at %.2f",
-                    new_swing["type"],
-                    new_swing["price"],
-                )
-
-                anchor_id = f"swing_{new_swing['type']}_{int(new_swing['timestamp'])}"
-                system.analytics_engine.avwap_manager.create_avwap(anchor_id, new_swing['timestamp'], f"swing_{new_swing['type']}")
-                system.market_events.persist_avwap_snapshot()
-
-                event_profile = VolumeProfile(system.symbol, 86400)
-                event_profile.set_tick_size(system.tick_size)
-                event_profile.anchor_ts = new_swing['timestamp']
-                system.analytics_engine.event_anchors[anchor_id] = event_profile
-
-            mono_now = time.monotonic()
-            for stream, last_seen in system.market_data_manager.ws_client.stream_last_seen.items():
-                lag = max(0.0, mono_now - float(last_seen))
-                metrics.update_stream_lag(stream, lag)
-            metrics.update_queue_depth('book', len(system.persister.book_buffer))
-            metrics.update_queue_depth('mark', len(system.persister.mark_buffer))
-            metrics.update_queue_depth('oi', len(system.persister.oi_buffer))
-            metrics.update_queue_depth('indicator', len(system.persister.indicator_buffer))
-            metrics.update_queue_depth('signal', len(system.persister.signal_buffer))
-
-            indicator_snapshot = system.analytics_engine.get_indicator_snapshot()
-            await system.persister.insert_indicator_state(indicator_snapshot)
-
     async def process_levels_and_signals(self):
         system = self.system
         while system.running:
@@ -458,7 +463,7 @@ class SignalLifecycleService:
 
             system.current_levels = self.build_current_levels(long_levels, short_levels)
 
-            await system.execution_service.check_breakthrough_opportunities(candidate_levels)
+            await system.execution_supervisor.check_breakthrough_opportunities(candidate_levels)
 
             zone_width_pct = self.zone_half_width_pct()
             self.create_signals_for_levels(long_levels, 'long', zone_width_pct)
@@ -498,7 +503,7 @@ class SignalLifecycleService:
                 if transition.action == 'place_order':
                     signal = transition.signal
                     if signal:
-                        await system.execution_service.execute_signal(signal)
+                        await system.execution_supervisor.execute_signal(signal)
 
                 elif transition.action == 'cancel_order':
                     snapshot = transition.signal
@@ -560,7 +565,7 @@ class SignalLifecycleService:
                             system._qprice(target_price),
                             sig.order_id or 'unknown'
                         )
-                        system.execution_service.arm_hold_timer(sig)
+                        system.execution_supervisor.arm_hold_timer(sig)
                         await system.persister.insert_signal(sig.to_dict())
 
             for signal in list(system.signal_manager.active_signals.values()):
@@ -583,7 +588,7 @@ class SignalLifecycleService:
                     if hit_stop or hit_target:
                         exit_price = signal.stop_price if hit_stop else signal.target_price
                         reason = 'stop' if hit_stop else 'target'
-                        await system.execution_service.finalize_signal_exit(signal, exit_price, reason)
+                        await system.execution_supervisor.finalize_signal_exit(signal, exit_price, reason)
                         continue
 
                     hold_seconds = system.risk_manager.get_max_hold_seconds()
@@ -593,13 +598,13 @@ class SignalLifecycleService:
                         and time.time() >= signal.hold_expires_at
                     ):
                         exit_price = system.current_price or signal.entry_price or 0.0
-                        await system.execution_service.finalize_signal_exit(signal, exit_price, 'hold_timeout')
+                        await system.execution_supervisor.finalize_signal_exit(signal, exit_price, 'hold_timeout')
                         continue
 
                     avwap_id = f"entry_{signal.signal_id}"
                     if avwap_id not in system.analytics_engine.avwap_manager.avwaps:
                         system.analytics_engine.avwap_manager.create_avwap(avwap_id, signal.filled_at, 'entry')
-                        system.market_events.persist_avwap_snapshot()
+                        system.ingest_coordinator.persist_avwap_snapshot()
 
                     avwap_obj = system.analytics_engine.avwap_manager.get_avwap(avwap_id)
                     if avwap_obj and avwap_obj.avwap and avwap_obj.sigma:
@@ -624,7 +629,7 @@ class SignalLifecycleService:
             metrics.update_signals(state_counts)
 
 
-class ExecutionController:
+class ExecutionRiskSupervisor:
     def __init__(self, system: 'TradingSystem'):
         self.system = system
         self._signal_audit_task: Optional[asyncio.Task] = None
@@ -1094,7 +1099,7 @@ class ExecutionController:
             logger.info("Kill switch cancelled %s open orders", cancelled)
         except Exception as exc:
             logger.error("Kill switch cancel-all failed: %s", exc)
-        system.market_events.mark_microstructure_contaminated(f"kill_switch_{reason}")
+        system.ingest_coordinator.mark_microstructure_contaminated(f"kill_switch_{reason}")
 
     async def handle_user_order(self, order: Dict):
         system = self.system
