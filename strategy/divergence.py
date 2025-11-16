@@ -35,7 +35,8 @@ class DivergenceDetector:
         if price_move_pct < self.min_price_move_pct or abs(rsi2 - rsi1) < self.min_indicator_move:
             return False, context
 
-        abs(swing2["bar"] - swing1["bar"])
+        if not self._swings_in_sync(swing1, swing2, context):
+            return False, context
 
         if bearish:
             price_hh = price2 > price1
@@ -60,6 +61,9 @@ class DivergenceDetector:
             "delta": cvd2 - cvd1,
         }
         if price_move_pct < self.min_price_move_pct:
+            return False, context
+
+        if not self._swings_in_sync(swing1, swing2, context):
             return False, context
 
         cvd_range = abs(cvd2 - cvd1)
@@ -108,6 +112,9 @@ class DivergenceDetector:
         if price_move_pct < self.min_price_move_pct:
             return False, context
 
+        if not self._swings_in_sync(swing1, swing2, context):
+            return False, context
+
         # Divergence: price continues trend but volume contracts materially
         volume_down = v2 < v1 * (1.0 - max(self.vol_delta_pct, 0.0))
         if bearish:
@@ -142,6 +149,9 @@ class DivergenceDetector:
         if price_move_pct < self.min_price_move_pct:
             return False, context
 
+        if not self._swings_in_sync(swing1, swing2, context):
+            return False, context
+
         base = max(abs(h1), abs(h2))
         if base <= 0:
             return False, context
@@ -171,6 +181,18 @@ class DivergenceDetector:
         if extra:
             context.update(cast(Dict, extra))
         return price_move_pct, context
+
+    def _swings_in_sync(self, swing1: Dict, swing2: Dict, context: Dict) -> bool:
+        tolerance = max(int(self.sync_tolerance or 0), 0)
+        if tolerance <= 0:
+            return True
+        bar1 = swing1.get("bar")
+        bar2 = swing2.get("bar")
+        if bar1 is None or bar2 is None:
+            return True
+        distance = abs(int(bar2) - int(bar1))
+        context["bar_distance"] = distance
+        return distance <= tolerance
 
     def check_obi_divergence(self, swing2: Dict, bearish: bool):
         obi_z = swing2.get("obi_z")

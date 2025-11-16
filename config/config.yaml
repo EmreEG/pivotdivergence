@@ -65,7 +65,7 @@ scoring:
   min_order_distance_pct: 0.0025
   
 divergence:
-  sync_tolerance_bars: 3
+  sync_tolerance_bars: 10
   rsi_delta: 3.0
   cvd_delta_pct: 0.10
   obi_z_threshold: 2.0
