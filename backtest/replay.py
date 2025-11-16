@@ -177,13 +177,13 @@ class ReplaySimulator:
                     await asyncio.sleep(sleep_ms / 1000.0)
 
             if ev.type == "trade":
-                await self.trading_system.handle_trade(ev.payload)
+                await self.trading_system.ingest_coordinator.handle_trade(ev.payload)
             elif ev.type == "orderbook":
-                await self.trading_system.handle_orderbook(ev.payload)
+                await self.trading_system.ingest_coordinator.handle_orderbook(ev.payload)
             elif ev.type == "mark":
-                await self.trading_system.handle_ticker(ev.payload)
+                await self.trading_system.ingest_coordinator.handle_ticker(ev.payload)
             elif ev.type == "oi":
-                await self.trading_system.handle_oi(ev.payload)
+                await self.trading_system.ingest_coordinator.handle_oi(ev.payload)
 
         await self.trading_system.persister.stop()
         self.trading_system.running = False
