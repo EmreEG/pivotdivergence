@@ -82,6 +82,6 @@ def test_replay_simulator_runs():
 
         # Basic assertions: handlers executed without exceptions
         assert system.current_price is not None
-        assert len(system.profiles) > 0
+        assert len(system.profile_service.profiles) > 0
 
     asyncio.run(_run())

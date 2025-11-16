@@ -4,21 +4,11 @@ import logging
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
 from ingest.websocket_client import WebSocketClient
 from ingest.rest_poller import RESTPoller
 from ingest.book_manager import OrderBookManager
 from ingest.persister import DataPersister
-from analytics.profile import VolumeProfile
-from analytics.extrema import ExtremaDetector
-from analytics.naked_poc import NakedPOCTracker
-from analytics.avwap import AVWAPManager
-from analytics.orderflow import CVDCalculator, OBICalculator, OIAnalyzer
-from analytics.indicators import IndicatorCalculator
-from analytics.swings import ZigZagSwing
-from analytics.profile_shape import ProfileShapeDetector
-from analytics.footprint import FootprintManager
-from strategy.level_selector import LevelSelector
-from strategy.divergence import DivergenceDetector
 from strategy.signal_manager import SignalManager, SignalState, Signal
 from strategy.execution import ExecutionManager
 from risk.position_sizer import RiskManager
@@ -90,13 +80,9 @@ class TradingSystem:
             self.symbol,
             self.tick_size
         )
-        self.swing_detector = self.analytics_engine.swing_detector
-
-        self.level_registry = self.analytics_engine.level_registry
-        self.avwap_manager = self.analytics_engine.avwap_manager
-        self.profiles: Dict[str, VolumeProfile] = self.analytics_engine.profiles
-        self.indicators = self.analytics_engine.indicators
-        self.cvd_calc = self.analytics_engine.cvd_calc
+        self.profile_service = self.analytics_engine.profile_service
+        self.order_flow = self.analytics_engine.order_flow_service
+        self.swing_service = self.analytics_engine.swing_service
 
         from strategy.signal_processor import SignalProcessor
         self.signal_processor = SignalProcessor(self.config)
@@ -113,7 +99,7 @@ class TradingSystem:
             self.microstructure_cfg,
             self.monitoring_cfg,
             self.execution_manager,
-            self.analytics_engine.obi_calc,
+            self.order_flow.obi_calc,
             self.persister,
         )
         self.market_events = MarketEventService(
@@ -141,10 +127,7 @@ class TradingSystem:
         self.tick_size = self.execution_manager.get_tick_size()
         self.contract_multiplier = self.execution_manager.get_contract_multiplier()
         self.book_manager.tick_size = self.tick_size
-        self.level_registry.set_tick_size(self.tick_size)
-        for profile in self.profiles.values():
-            profile.set_tick_size(self.tick_size)
-        self.avwap_manager.set_tick_size(self.tick_size)
+        self.profile_service.set_tick_size(self.tick_size)
 
     def _qprice(self, price: float) -> float:
         tick = self.tick_size or self.execution_manager.get_tick_size()

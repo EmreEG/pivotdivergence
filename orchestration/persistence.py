@@ -1,4 +1,5 @@
 import json
+import json
 import logging
 import time
 from typing import Dict, TYPE_CHECKING
@@ -25,7 +26,7 @@ class PersistenceCoordinator:
         try:
             if self.avwap_snapshot_path.exists():
                 data = json.loads(self.avwap_snapshot_path.read_text())
-                self.system.avwap_manager.restore(data)
+                self.system.profile_service.restore_avwaps(data)
                 logger.info("Restored AVWAP snapshot state")
         except Exception as exc:
             logger.warning("AVWAP snapshot restore failed: %s", exc)
@@ -35,7 +36,7 @@ class PersistenceCoordinator:
         if now - self.last_avwap_snapshot < 30:
             return
         try:
-            snapshot = self.system.avwap_manager.snapshot()
+            snapshot = self.system.profile_service.snapshot_avwaps()
             self.avwap_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
             self.avwap_snapshot_path.write_text(json.dumps(snapshot))
             self.last_avwap_snapshot = now
@@ -46,7 +47,7 @@ class PersistenceCoordinator:
         try:
             if self.cvd_snapshot_path.exists():
                 data = json.loads(self.cvd_snapshot_path.read_text())
-                self.system.cvd_calc.restore_state(data)
+                self.system.order_flow.restore_cvd_state(data)
                 logger.info("Restored CVD snapshot state")
         except Exception as exc:
             logger.warning("CVD snapshot restore failed: %s", exc)
@@ -56,7 +57,7 @@ class PersistenceCoordinator:
         if now - self.last_cvd_snapshot < 30:
             return
         try:
-            snapshot = self.system.cvd_calc.snapshot_state()
+            snapshot = self.system.order_flow.snapshot_cvd_state()
             if snapshot and snapshot.get('stable', True):
                 self.cvd_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
                 self.cvd_snapshot_path.write_text(json.dumps(snapshot))

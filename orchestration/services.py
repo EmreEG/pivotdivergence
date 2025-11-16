@@ -5,7 +5,6 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from api.alerts import alert_webhook
 from api.metrics import metrics
-from analytics.profile import VolumeProfile
 from strategy.execution_types import OrderTicket
 from strategy.signal_manager import SignalState, Signal
 
@@ -33,7 +32,7 @@ class MarketEventService:
                 system.orderbook_cfg.get('max_depth', 200)
             )
             system.book_manager.process_snapshot(snapshot)
-            system.cvd_calc.mark_resynced()
+            system.order_flow.mark_cvd_resynced()
             self.microstructure.mark_contaminated(reason)
             metrics.record_orderbook_resync()
         except Exception as exc:
@@ -53,8 +52,8 @@ class MarketEventService:
         system.current_price = price
         system.analytics_engine.on_trade(trade)
 
-        cvd_value = system.analytics_engine.cvd_calc.get_cvd()
-        stable_cvd = system.analytics_engine.cvd_calc.is_stable()
+        cvd_value = system.order_flow.get_cvd()
+        stable_cvd = system.order_flow.is_cvd_stable()
 
         metrics.record_trade(latency_s)
         metrics.update_price(price)
@@ -144,12 +143,9 @@ class MarketEventService:
             if system.last_funding_rate is None or system.current_funding != system.last_funding_rate:
                 ts = ticker['timestamp'] / 1000
                 anchor_id = f"funding_{int(ts)}"
-                system.avwap_manager.create_avwap(anchor_id, ts, 'funding')
+                system.profile_service.create_avwap(anchor_id, ts, 'funding')
                 self.persistence.persist_avwap_snapshot()
-                event_profile = VolumeProfile(system.symbol, 86400)
-                event_profile.set_tick_size(system.tick_size)
-                event_profile.anchor_ts = ts
-                system.analytics_engine.event_anchors[anchor_id] = event_profile
+                system.profile_service.create_event_anchor(anchor_id, ts)
                 system.last_funding_anchor_ts = ts
                 system.last_funding_rate = system.current_funding
 
@@ -225,25 +221,31 @@ class AnalyticsBarService:
             now = time.time()
             system.analytics_engine.on_bar(system.current_price, now)
 
-            rsi = system.analytics_engine.indicators.get_rsi()
+            indicators = system.order_flow.indicators
+            rsi = indicators.get_rsi()
             self._latest_rsi = rsi
             if rsi is not None:
                 metrics.update_rsi(rsi)
 
-            realized_vol = system.analytics_engine.indicators.get_realized_volatility()
+            realized_vol = indicators.get_realized_volatility()
             if realized_vol is not None:
                 self._current_volatility = realized_vol
                 system.current_volatility = realized_vol
                 metrics.update_realized_volatility(realized_vol)
 
-            new_swing = system.analytics_engine.swing_detector.update(
+            macd_vals = indicators.get_macd()
+            macd_hist = macd_vals.get('histogram') if macd_vals else None
+            footprint_bar = system.order_flow.get_current_footprint_bar()
+            volume = footprint_bar.total_volume if footprint_bar else 0.0
+
+            new_swing = system.swing_service.update(
                 system.current_price,
                 now,
                 rsi,
-                system.analytics_engine.cvd_calc.get_cvd(),
-                system.analytics_engine.obi_calc.get_obi_z_score(),
-                macd_hist=system.analytics_engine.indicators.get_macd().get('histogram'),
-                volume=system.analytics_engine.footprint_manager.get_current_bar().total_volume,
+                system.order_flow.get_cvd(),
+                system.order_flow.get_obi_z(),
+                macd_hist=macd_hist,
+                volume=volume,
             )
 
             if new_swing:
@@ -255,13 +257,9 @@ class AnalyticsBarService:
                 )
 
                 anchor_id = f"swing_{new_swing['type']}_{int(new_swing['timestamp'])}"
-                system.analytics_engine.avwap_manager.create_avwap(anchor_id, new_swing['timestamp'], f"swing_{new_swing['type']}")
+                system.profile_service.create_avwap(anchor_id, new_swing['timestamp'], f"swing_{new_swing['type']}")
                 system.persistence_coordinator.persist_avwap_snapshot()
-
-                event_profile = VolumeProfile(system.symbol, 86400)
-                event_profile.set_tick_size(system.tick_size)
-                event_profile.anchor_ts = new_swing['timestamp']
-                system.analytics_engine.event_anchors[anchor_id] = event_profile
+                system.profile_service.create_event_anchor(anchor_id, new_swing['timestamp'])
 
             mono_now = time.monotonic()
             for stream, last_seen in system.market_data_manager.ws_client.stream_last_seen.items():
@@ -288,7 +286,7 @@ class AnalyticsBarService:
         return self._last_swing
 
     def get_recent_swings(self, count: int = 10) -> List[Dict]:
-        return self.system.analytics_engine.swing_detector.get_last_n_swings(count)
+        return self.system.swing_service.get_last_n_swings(count)
 
 
 class SignalLifecycleService:
@@ -386,18 +384,18 @@ class SignalLifecycleService:
             candidate_levels = system.analytics_engine.get_candidate_levels()
 
             now_ts = time.time()
-            system.analytics_engine.level_registry.register_levels(candidate_levels, now_ts)
-            candidate_levels = system.analytics_engine.level_registry.enrich_levels(candidate_levels, now_ts)
+            system.profile_service.register_levels(candidate_levels, now_ts)
+            candidate_levels = system.profile_service.enrich_levels(candidate_levels, now_ts)
 
             best_bid = system.book_manager.get_best_bid()
             best_ask = system.book_manager.get_best_ask()
             if best_bid and best_ask:
-                system.analytics_engine.poc_tracker.check_touch(best_bid[0], best_ask[0], time.time())
+                system.profile_service.note_poc_touch(best_bid[0], best_ask[0], time.time())
 
-            system.analytics_engine.poc_tracker.cleanup_old(max_age_hours=72)
+            system.profile_service.cleanup_pocs(max_age_hours=72)
 
-            naked_pocs = system.analytics_engine.poc_tracker.get_naked_pocs()
-            avwaps = system.analytics_engine.avwap_manager.get_all()
+            naked_pocs = system.profile_service.get_naked_pocs()
+            avwaps = system.profile_service.get_avwaps()
             swings = self.bar_service.get_recent_swings(10)
 
             long_levels, short_levels = system.signal_processor.select_levels(
@@ -416,20 +414,20 @@ class SignalLifecycleService:
             self.create_signals_for_levels(long_levels, 'long', zone_width_pct)
             self.create_signals_for_levels(short_levels, 'short', zone_width_pct)
 
-            obi_z = system.analytics_engine.obi_calc.get_obi_z_score()
-            oi_slope = system.analytics_engine.oi_analyzer.get_slope()
+            obi_z = system.order_flow.get_obi_z()
+            oi_slope = system.order_flow.get_oi_slope()
 
             top_levels = system.book_manager.get_top_levels(system.microstructure_cfg.get('obi_depth_levels', 10))
             book_depth = len(top_levels['bids']) + len(top_levels['asks'])
             suppress_obi = (
                 book_depth < system.microstructure_cfg.get('obi_disable_depth', 10) or
                 ((not system.execution_manager.paper_mode) and system.microstructure_monitor.is_contaminated()) or
-                system.analytics_engine.obi_calc.is_contaminated()
+                system.order_flow.is_obi_contaminated()
             )
 
             divergence_results = {}
-            swings_high_pair = system.analytics_engine.swing_detector.get_last_two_highs()
-            swings_low_pair = system.analytics_engine.swing_detector.get_last_two_lows()
+            swings_high_pair = system.swing_service.get_last_two_highs()
+            swings_low_pair = system.swing_service.get_last_two_lows()
 
             for signal_id, signal in system.signal_manager.active_signals.items():
                 if signal.is_in_zone(system.current_price):
@@ -549,11 +547,11 @@ class SignalLifecycleService:
                         continue
 
                     avwap_id = f"entry_{signal.signal_id}"
-                    if avwap_id not in system.analytics_engine.avwap_manager.avwaps:
-                        system.analytics_engine.avwap_manager.create_avwap(avwap_id, signal.filled_at, 'entry')
+                    avwap_obj = system.profile_service.get_avwap(avwap_id)
+                    if not avwap_obj:
+                        system.profile_service.create_avwap(avwap_id, signal.filled_at, 'entry')
                         system.persistence_coordinator.persist_avwap_snapshot()
-
-                    avwap_obj = system.analytics_engine.avwap_manager.get_avwap(avwap_id)
+                        avwap_obj = system.profile_service.get_avwap(avwap_id)
                     if avwap_obj and avwap_obj.avwap and avwap_obj.sigma:
                         trail_stop = system.risk_manager.update_trail_stop(
                             signal.entry_price,
@@ -894,15 +892,17 @@ class ExecutionRiskSupervisor:
         system = self.system
         now = time.time()
         depth_stats = system.last_depth_stats or {}
+        order_flow = system.order_flow
+        profile_service = system.profile_service
         feature_vector = {
             'timestamp': now,
             'mode': mode,
             'level_price': signal.level_price,
             'current_price': system.current_price,
-            'rsi': system.indicators.get_rsi(),
-            'cvd': system.cvd_calc.get_cvd(),
-            'obi': system.obi_calc.get_latest_obi(),
-            'obi_z': system.obi_calc.get_obi_z_score(),
+            'rsi': order_flow.indicators.get_rsi(),
+            'cvd': order_flow.get_cvd(),
+            'obi': order_flow.obi_calc.get_latest_obi(),
+            'obi_z': order_flow.get_obi_z(),
             'depth_bid_qty': depth_stats.get('bid_qty'),
             'depth_ask_qty': depth_stats.get('ask_qty'),
             'depth_levels': depth_stats.get('depth'),
@@ -911,15 +911,15 @@ class ExecutionRiskSupervisor:
             'best_ask': depth_stats.get('best_ask'),
             'mid_price': depth_stats.get('mid_price'),
             'spread': depth_stats.get('spread'),
-            'oi_slope': system.oi_analyzer.get_slope(),
+            'oi_slope': order_flow.get_oi_slope(),
             'divergences': signal.divergences,
-            'cvd_unstable': not system.cvd_calc.is_stable(),
+            'cvd_unstable': not order_flow.is_cvd_stable(),
             'microstructure_degraded': system.microstructure_monitor.is_contaminated(),
             'volatility': self.bar_service.get_current_volatility(),
             'requested_qty': signal.requested_qty,
             'requested_notional': signal.requested_notional,
-            'naked_poc_count': len(system.analytics_engine.poc_tracker.get_naked_pocs()),
-            'avwap_count': len(system.avwap_manager.get_all()),
+            'naked_poc_count': len(profile_service.get_naked_pocs()),
+            'avwap_count': len(profile_service.get_avwaps()),
             'active_levels': [
                 {
                     'price': lvl.get('price'),
@@ -1079,9 +1079,9 @@ class ExecutionRiskSupervisor:
         if system.current_price is None:
             return
 
-        obi_z = system.obi_calc.get_obi_z_score()
-        system.cvd_calc.get_cvd()
-        oi_slope = system.oi_analyzer.get_slope()
+        obi_z = system.order_flow.get_obi_z()
+        system.order_flow.get_cvd()
+        oi_slope = system.order_flow.get_oi_slope()
 
         lvns_ahead = [
             level for level in candidate_levels if level["type"] == "LVN"

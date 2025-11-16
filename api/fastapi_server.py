@@ -108,7 +108,7 @@ async def get_profile(window: str):
     if not trading_system:
         return {"error": "Trading system not initialized"}
     
-    profile = trading_system.profiles.get(window)
+    profile = trading_system.profile_service.profiles.get(window)
     
     if not profile:
         return {"error": f"Profile window '{window}' not found"}
@@ -139,7 +139,7 @@ async def get_indicators():
     if not trading_system:
         return {"error": "Trading system not initialized"}
     
-    indicators_data = trading_system.indicators.to_dict()
+    indicators_data = trading_system.order_flow.indicators.to_dict()
     
     return {
         "rsi": indicators_data.get('rsi'),
@@ -149,10 +149,10 @@ async def get_indicators():
         "obv": indicators_data.get('obv'),
         "ad_line": indicators_data.get('ad_line'),
         "realized_volatility": indicators_data.get('realized_volatility'),
-        "cvd": trading_system.cvd_calc.get_cvd(),
-        "obi_z": trading_system.obi_calc.get_obi_z_score(),
-        "oi": trading_system.oi_analyzer.get_current_oi(),
-        "oi_slope": trading_system.oi_analyzer.get_slope(),
+        "cvd": trading_system.order_flow.get_cvd(),
+        "obi_z": trading_system.order_flow.get_obi_z(),
+        "oi": trading_system.order_flow.get_current_oi(),
+        "oi_slope": trading_system.order_flow.get_oi_slope(),
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -161,7 +161,7 @@ async def get_swings():
     if not trading_system:
         return {"error": "Trading system not initialized"}
     
-    swing_data = trading_system.swing_detector.to_dict()
+    swing_data = trading_system.swing_service.to_dict()
     
     return {
         "current_swing_type": swing_data['current_swing_type'],
@@ -176,7 +176,7 @@ async def get_avwap():
     if not trading_system:
         return {"error": "Trading system not initialized"}
     
-    avwaps = trading_system.avwap_manager.get_all()
+    avwaps = trading_system.profile_service.get_avwaps()
     
     return {
         "avwaps": avwaps,
@@ -189,7 +189,7 @@ async def get_current_footprint():
     if not trading_system:
         return {"error": "Trading system not initialized"}
     
-    current_bar = trading_system.footprint_manager.get_current_bar()
+    current_bar = trading_system.order_flow.get_current_footprint_bar()
     
     if not current_bar:
         return {"error": "No current footprint bar"}
@@ -222,9 +222,9 @@ async def get_absorption_at_level(level_price: float):
     if not trading_system:
         return {"error": "Trading system not initialized"}
     
-    absorption_detected = trading_system.footprint_manager.detect_absorption_at_level(level_price, lookback_bars=5)
-    
-    recent_bars = trading_system.footprint_manager.get_last_n_bars(5)
+    absorption_detected = trading_system.order_flow.detect_absorption(level_price, lookback_bars=5)
+
+    recent_bars = trading_system.order_flow.get_recent_footprint_bars(5)
     
     bar_details = []
     for bar in recent_bars:
@@ -268,10 +268,10 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             if trading_system and trading_system.running:
-                indicator_payload = trading_system.indicators.to_dict()
+                indicator_payload = trading_system.order_flow.indicators.to_dict()
                 indicator_payload.update({
-                    "cvd": trading_system.cvd_calc.get_cvd(),
-                    "obi_z": trading_system.obi_calc.get_obi_z_score()
+                    "cvd": trading_system.order_flow.get_cvd(),
+                    "obi_z": trading_system.order_flow.get_obi_z()
                 })
                 data = {
                     "type": "update",
